@@ -1,8 +1,19 @@
+:root {
+  --page-bg: rgba(247, 247, 247, 1);
+  --card-bg: #ffffff;
+  --font-app: 'Mulish', system-ui, -apple-system, sans-serif;
+  --heading-color: rgba(71, 71, 71, 1);
+  --tab-accent: rgba(96, 216, 18, 1);
+}
+
 * {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  background: #f3f4f6;
+  min-height: 100vh;
+  background: var(--page-bg);
+  font-family: var(--font-app);
+  color: #1f2937;
 }

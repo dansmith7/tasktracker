@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const statusOptions = ['К выполнению', 'В работе', 'Готово']
@@ -270,91 +270,24 @@ const getDependencyMeta = (task, tasks) => {
 
 function TaskDependencyPanel({ task, tasks, compact }) {
   const dep = getDependencyMeta(task, tasks)
-  const hasAny = dep.isBlocked || dep.isBlocking
-  if (compact) {
-    if (!hasAny) return null
-    return (
-      <div className="dep-compact" role="group" aria-label="Зависимости задачи">
-        {dep.isBlocked && (
-          <div className="dep-compact-line dep-compact-line--blocked">
-            <span aria-hidden>⛔</span>
-            <span> Заблокирована</span>
-            {dep.parentTitle && (
-              <>
-                {' · '}
-                <span className="dep-compact-wait">Ждёт: {dep.parentTitle}</span>
-              </>
-            )}
-          </div>
-        )}
-        {dep.isBlocking && (
-          <div
-            className={
-              dep.isBlocked
-                ? 'dep-compact-line dep-compact-line--blocking-secondary'
-                : 'dep-compact-line dep-compact-line--blocking'
-            }
-          >
-            <span aria-hidden>⚠️</span>
-            <span> Блокирует: {ruTasksCountLabel(dep.blockingCount)}</span>
-          </div>
-        )}
-      </div>
-    )
-  }
-  if (!hasAny) return null
+  if (!dep.isBlocked && !dep.isBlocking) return null
+  const blockingTitles =
+    dep.dependents.length > 0 ? dep.dependents.map((d) => d.title).join(', ') : null
   return (
-    <div className="dep-stack" role="group" aria-label="Зависимости задачи">
+    <div
+      className={compact ? 'dep-lines dep-lines--compact' : 'dep-lines'}
+      role="group"
+      aria-label="Зависимости задачи"
+    >
       {dep.isBlocked && (
-        <div className="dep-panel dep-panel--blocked">
-          <div className="dep-field-label">Статус</div>
-          <div className="dep-line dep-line--blocked-title">
-            <span className="dep-emoji" aria-hidden>
-              ⛔
-            </span>
-            <span className="dep-strong">Заблокирована</span>
-          </div>
-          {dep.parentTitle && (
-            <>
-              <div className="dep-field-label">Ждёт</div>
-              <div className="dep-wait-box">{dep.parentTitle}</div>
-            </>
-          )}
+        <div className="dep-line">
+          <span aria-hidden>⛔</span> Ждёт: {dep.parentTitle ?? '—'}
         </div>
       )}
       {dep.isBlocking && (
-        <div
-          className={
-            dep.isBlocked ? 'dep-panel dep-panel--blocking dep-panel--secondary' : 'dep-panel dep-panel--blocking'
-          }
-        >
-          {!dep.isBlocked && (
-            <>
-              <div className="dep-field-label">Статус</div>
-              <div className="dep-line dep-line--blocking-title">
-                <span className="dep-emoji" aria-hidden>
-                  ⚠️
-                </span>
-                <span className="dep-strong">Блокирует: {ruTasksCountLabel(dep.blockingCount)}</span>
-              </div>
-            </>
-          )}
-          {dep.isBlocked && (
-            <div className="dep-line dep-line--blocking-secondary">
-              <span className="dep-emoji" aria-hidden>
-                ⚠️
-              </span>
-              <span className="dep-strong">Блокирует: {ruTasksCountLabel(dep.blockingCount)}</span>
-            </div>
-          )}
-          <div className="dep-field-label">Блокирует</div>
-          <div className="dep-chips">
-            {dep.dependents.map((d) => (
-              <span key={d.id} className="dep-chip">
-                {d.title}
-              </span>
-            ))}
-          </div>
+        <div className="dep-line">
+          <span aria-hidden>⚠️</span> Блокирует: {ruTasksCountLabel(dep.blockingCount)}
+          {blockingTitles ? <span className="dep-line-names"> — {blockingTitles}</span> : null}
         </div>
       )}
     </div>
@@ -385,11 +318,58 @@ function App() {
   const [milestonePlan, setMilestonePlan] = useState({})
   const [violatingTaskIds, setViolatingTaskIds] = useState([])
   const [dependencyError, setDependencyError] = useState(null)
+  const [showNewProjectModal, setShowNewProjectModal] = useState(false)
+  const [newProjectName, setNewProjectName] = useState('')
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   )
+
+  useEffect(() => {
+    if (projects.length === 0) return
+    if (!projects.some((p) => p.id === selectedProjectId)) {
+      setSelectedProjectId(projects[0].id)
+    }
+  }, [projects, selectedProjectId])
+
+  const switchProject = (id) => {
+    setSelectedProjectId(id)
+    setSelectedTaskIds([])
+    setBulkMoveTargetMilestoneId('')
+    setViolatingTaskIds([])
+    setDependencyError(null)
+  }
+
+  const TAB_SHOW_ALL_MAX = 7
+  const TAB_OVERFLOW_VISIBLE = 5
+  const { primaryTabs, overflowTabs } = useMemo(() => {
+    if (projects.length <= TAB_SHOW_ALL_MAX) {
+      return { primaryTabs: projects, overflowTabs: [] }
+    }
+    return {
+      primaryTabs: projects.slice(0, TAB_OVERFLOW_VISIBLE),
+      overflowTabs: projects.slice(TAB_OVERFLOW_VISIBLE),
+    }
+  }, [projects])
+
+  const createProject = () => {
+    const name = newProjectName.trim()
+    if (!name) return
+    const id = `p-${Date.now()}`
+    setProjects((prev) => [...prev, { id, name, milestones: [], tasks: [] }])
+    setExpandedMilestonesByProject((prev) => ({
+      ...prev,
+      [id]: [ungroupedMilestoneId],
+    }))
+    setSelectedProjectId(id)
+    setNewProjectName('')
+    setShowNewProjectModal(false)
+    setSelectedTaskIds([])
+    setBulkMoveTargetMilestoneId('')
+    setViolatingTaskIds([])
+    setDependencyError(null)
+  }
 
   const groupedMilestones = useMemo(() => {
     if (!selectedProject) return []
@@ -632,7 +612,7 @@ function App() {
       task.status === 'В работе' && Math.round((today - toDate(task.startDate)) / dayMs) > 10
     const d = diffDays(task.deadline, todayDateString)
     const blocksOthersSoon =
-      getDependencyMeta(task, selectedProject.tasks).isBlocking && d >= 0 && d <= 7
+      getDependencyMeta(task, selectedProject?.tasks ?? []).isBlocking && d >= 0 && d <= 7
     return noAssignee || overdue || tooLongInProgress || blocksOthersSoon
   })
 
@@ -650,14 +630,62 @@ function App() {
     return { start, end, days: Math.max(1, diffDays(end, start) + 1) }
   }, [sortedTasks])
 
-  if (!selectedProject) return null
-
   return (
     <main className="app-shell">
       <header className="app-header">
         <h1>Командный центр проекта</h1>
         <p>Центр управления сроками и задачами в режиме приоритета дедлайнов.</p>
       </header>
+
+      <nav className="project-tabs" aria-label="Проекты">
+        <div className="project-tabs__list">
+          {primaryTabs.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              role="tab"
+              aria-selected={selectedProjectId === project.id}
+              className={`project-tab ${selectedProjectId === project.id ? 'project-tab--active' : ''}`}
+              onClick={() => switchProject(project.id)}
+            >
+              <span className="project-tab__label">{project.name}</span>
+              <span className="project-tab__count">({project.tasks.length})</span>
+            </button>
+          ))}
+          {overflowTabs.length > 0 && (
+            <details className="project-tabs__overflow">
+              <summary className="project-tab project-tab--overflow">ещё {overflowTabs.length}</summary>
+              <div className="project-tabs__overflow-menu">
+                {overflowTabs.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className="project-tabs__overflow-item"
+                    onClick={() => switchProject(project.id)}
+                  >
+                    {project.name}{' '}
+                    <span className="project-tab__count">({project.tasks.length})</span>
+                  </button>
+                ))}
+              </div>
+            </details>
+          )}
+          <button
+            type="button"
+            className="project-tab project-tab--add"
+            aria-label="Новый проект"
+            onClick={() => setShowNewProjectModal(true)}
+          >
+            +
+          </button>
+        </div>
+      </nav>
+
+      {selectedProject && (
+        <div className="project-tabs-meta muted">
+          Авто-дедлайн: {projectDeadline ? formatDate(projectDeadline) : 'Нет данных'}
+        </div>
+      )}
 
       {dependencyError && (
         <div
@@ -669,45 +697,22 @@ function App() {
         </div>
       )}
 
-      <section className="panel">
-        <div className="panel-head">
-          <h2>Проект</h2>
-          <select
-            value={selectedProjectId}
-            onChange={(event) => {
-              setSelectedProjectId(event.target.value)
-              setSelectedTaskIds([])
-              setBulkMoveTargetMilestoneId('')
-              setViolatingTaskIds([])
-              setDependencyError(null)
-            }}
-          >
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-          <span className="muted">
-            Авто-дедлайн: {projectDeadline ? formatDate(projectDeadline) : 'Нет данных'}
-          </span>
-        </div>
-      </section>
-
+      {selectedProject ? (
+        <div key={selectedProjectId} className="app-shell-content app-shell-content--fade">
       <section className="panel command-grid">
-        <article className="command-card danger">
+        <article className="command-card command-card--overdue">
           <h3>Просроченные</h3>
           <p>{overdueTasks.length}</p>
         </article>
-        <article className="command-card warning">
+        <article className="command-card command-card--today">
           <h3>На сегодня</h3>
           <p>{todayTasks.length}</p>
         </article>
-        <article className="command-card ok">
+        <article className="command-card command-card--upcoming">
           <h3>Ближайшие</h3>
           <p>{upcomingTasks.length}</p>
         </article>
-        <article className="command-card neutral">
+        <article className="command-card command-card--problematic">
           <h3>Проблемные</h3>
           <p>{problematicTasks.length}</p>
         </article>
@@ -716,38 +721,43 @@ function App() {
       <section className="panel">
         <h2>Лента командного центра</h2>
         <div className="feed-grid">
-          <div>
+          <div className="feed-column feed-column--overdue">
             <h4>
-              <span aria-hidden>🔴</span> Просроченные
+              <span className="feed-heading-dot feed-heading-dot--overdue" aria-hidden />
+              Просроченные
             </h4>
             {overdueTasks.map((task) => (
               <div key={task.id} className="feed-row">
                 <span>{task.title}</span>
-                <span className="tag overdue">{formatDate(task.deadline)}</span>
+                <span className="tag tag--feed tag--feed-overdue">{formatDate(task.deadline)}</span>
               </div>
             ))}
           </div>
-          <div>
+          <div className="feed-column feed-column--today">
             <h4>
-              <span aria-hidden>🟡</span> На сегодня
+              <span className="feed-heading-dot feed-heading-dot--today" aria-hidden />
+              На сегодня
             </h4>
             {todayTasks.map((task) => (
               <div key={task.id} className="feed-row">
                 <span>{task.title}</span>
-                <span className="tag today">{formatDate(task.deadline)}</span>
+                <span className="tag tag--feed tag--feed-today">{formatDate(task.deadline)}</span>
               </div>
             ))}
           </div>
-          <div>
-            <h4>Ближайшие</h4>
+          <div className="feed-column feed-column--upcoming">
+            <h4>
+              <span className="feed-heading-dot feed-heading-dot--upcoming" aria-hidden />
+              Ближайшие
+            </h4>
             {upcomingTasks.map((task) => (
               <div key={task.id} className="feed-row">
                 <span>{task.title}</span>
-                <span className="tag upcoming">{formatDate(task.deadline)}</span>
+                <span className="tag tag--feed tag--feed-upcoming">{formatDate(task.deadline)}</span>
               </div>
             ))}
           </div>
-          <div>
+          <div className="feed-column feed-column--problematic">
             <h4>
               <span aria-hidden>🔥</span> Проблемные
             </h4>
@@ -767,7 +777,7 @@ function App() {
               return (
                 <div key={task.id} className="feed-row">
                   <span>{task.title}</span>
-                  <span className="muted">{subtitle}</span>
+                  <span className="feed-problematic-status">{subtitle}</span>
                 </div>
               )
             })}
@@ -1165,6 +1175,52 @@ function App() {
           })}
         </div>
       </section>
+        </div>
+      ) : projects.length === 0 ? (
+        <div className="empty-projects">
+          <p className="muted">Нет проектов</p>
+          <button type="button" className="empty-projects__btn" onClick={() => setShowNewProjectModal(true)}>
+            Создать проект
+          </button>
+        </div>
+      ) : null}
+      {showNewProjectModal && (
+        <div
+          className="project-modal-backdrop"
+          role="presentation"
+          onClick={() => setShowNewProjectModal(false)}
+        >
+          <div
+            className="project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-project-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="new-project-title">Новый проект</h3>
+            <label className="project-modal__field">
+              <span>Название</span>
+              <input
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                placeholder="Название проекта"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') createProject()
+                }}
+              />
+            </label>
+            <div className="project-modal__actions">
+              <button type="button" onClick={() => setShowNewProjectModal(false)}>
+                Отмена
+              </button>
+              <button type="button" onClick={createProject} disabled={!newProjectName.trim()}>
+                Создать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
