@@ -5,6 +5,19 @@ const statusOptions = ['К выполнению', 'В работе', 'Готов
 const ungroupedMilestoneId = 'none'
 const dayMs = 1000 * 60 * 60 * 24
 
+/**
+ * Задача в проекте. Зависимость (MVP): не более одной родительской задачи в том же проекте.
+ * @typedef {Object} Task
+ * @property {string} id
+ * @property {string} title
+ * @property {string} status
+ * @property {string} assignee
+ * @property {string} startDate
+ * @property {string} deadline
+ * @property {string | null} milestoneId
+ * @property {string | null} dependsOnTaskId — id родительской задачи или null
+ */
+
 const seedProjects = [
   {
     id: 'p1',
@@ -23,6 +36,7 @@ const seedProjects = [
         startDate: '2026-03-20',
         deadline: '2026-03-23',
         milestoneId: 'm1',
+        dependsOnTaskId: null,
       },
       {
         id: 't2',
@@ -32,24 +46,39 @@ const seedProjects = [
         startDate: '2026-03-25',
         deadline: '2026-04-02',
         milestoneId: 'm1',
+        dependsOnTaskId: null,
       },
+      /* Тест A→B (ручной сдвиг дедлайна A: должна сдвинуться B). A: 1–3.04, B: 4–6.04.2026 */
       {
         id: 't3',
         title: 'Сверстать лендинг',
         status: 'К выполнению',
         assignee: 'Maya',
         startDate: '2026-04-01',
-        deadline: '2026-04-06',
+        deadline: '2026-04-03',
         milestoneId: 'm2',
+        dependsOnTaskId: null,
       },
       {
         id: 't4',
         title: 'Подключить аналитику',
         status: 'К выполнению',
         assignee: '',
-        startDate: '2026-04-02',
-        deadline: '2026-04-08',
+        startDate: '2026-04-04',
+        deadline: '2026-04-06',
         milestoneId: 'm2',
+        dependsOnTaskId: 't3',
+      },
+      /* Цепочка A(t3)→B(t4)→C: сдвиг A на +2 дня тянет B, затем C */
+      {
+        id: 't4b',
+        title: 'Интеграция формы (цепочка C)',
+        status: 'К выполнению',
+        assignee: '',
+        startDate: '2026-04-07',
+        deadline: '2026-04-09',
+        milestoneId: 'm2',
+        dependsOnTaskId: 't4',
       },
       {
         id: 't5',
@@ -59,6 +88,7 @@ const seedProjects = [
         startDate: '2026-04-05',
         deadline: '2026-04-10',
         milestoneId: null,
+        dependsOnTaskId: null,
       },
     ],
   },
@@ -78,6 +108,7 @@ const seedProjects = [
         startDate: '2026-03-28',
         deadline: '2026-04-01',
         milestoneId: 'm4',
+        dependsOnTaskId: null,
       },
       {
         id: 't7',
@@ -87,6 +118,7 @@ const seedProjects = [
         startDate: '2026-04-01',
         deadline: '2026-04-05',
         milestoneId: 'm4',
+        dependsOnTaskId: null,
       },
       {
         id: 't8',
@@ -96,6 +128,7 @@ const seedProjects = [
         startDate: '2026-04-05',
         deadline: '2026-04-10',
         milestoneId: 'm5',
+        dependsOnTaskId: null,
       },
     ],
   },
@@ -118,6 +151,63 @@ const shiftDate = (dateString, days) => {
   return toLocalDateString(date)
 }
 
+/** Лаг после дедлайна родителя (Finish-to-Start). */
+const FS_LAG_DAYS = 1
+
+/**
+ * Сохраняет длительность дочерней задачи: duration = deadline − start, затем
+ * start = deadline родителя + lag, deadline = start + duration.
+ */
+const rescheduleChildFromParent = (parentTask, childTask) => {
+  const duration = diffDays(childTask.deadline, childTask.startDate)
+  const newStart = shiftDate(parentTask.deadline, FS_LAG_DAYS)
+  const newDeadline = shiftDate(newStart, duration)
+  return { ...childTask, startDate: newStart, deadline: newDeadline }
+}
+
+/**
+ * После изменения дедлайна задачи пересчитывает всех зависимых по цепочке (A→B→C…)
+ * в порядке BFS: сначала прямые потомки, затем их потомки, с актуальными датами родителя.
+ */
+const cascadeFsShiftFromParent = (tasks, changedTask) => {
+  let next = tasks.map((t) => (t.id === changedTask.id ? changedTask : t))
+  const queue = [changedTask]
+  while (queue.length) {
+    const popped = queue.shift()
+    const parent = next.find((t) => t.id === popped.id) ?? popped
+    const children = next.filter((t) => (t.dependsOnTaskId ?? null) === parent.id)
+    for (const child of children) {
+      const updated = rescheduleChildFromParent(parent, child)
+      next = next.map((t) => (t.id === child.id ? updated : t))
+      queue.push(updated)
+    }
+  }
+  return next
+}
+
+/**
+ * Связь «taskId зависит от newParentId» замкнёт цикл, если от newParentId по цепочке dependsOnTaskId
+ * можно дойти обратно до taskId.
+ */
+const wouldDependencyCreateCycle = (tasks, taskId, newParentId) => {
+  if (!newParentId) return false
+  if (newParentId === taskId) return true
+  let walker = newParentId
+  const seen = new Set()
+  while (walker) {
+    if (walker === taskId) return true
+    if (seen.has(walker)) return true
+    seen.add(walker)
+    const node = tasks.find((t) => t.id === walker)
+    if (!node) break
+    walker = node.dependsOnTaskId ?? null
+  }
+  return false
+}
+
+const DEPENDENCY_CYCLE_MESSAGE =
+  'Нельзя создать зависимость: получится замкнутая цепочка'
+
 const getDeadlineLabel = (deadline) => {
   const today = dateOnly(new Date())
   const days = Math.round((toDate(deadline) - today) / dayMs)
@@ -138,14 +228,6 @@ const getStatusClass = (status) => {
   return 'status-todo'
 }
 
-const getProjectCode = (name) =>
-  name
-    .split(' ')
-    .map((w) => w[0])
-    .join('')
-    .toUpperCase()
-    .slice(0, 4)
-
 const getInitials = (name) => {
   if (!name) return '?'
   return name
@@ -160,6 +242,122 @@ const maxDate = (dates) => {
   if (!dates.length) return null
   return dates.reduce((latest, current) =>
     toDate(current) > toDate(latest) ? current : latest,
+  )
+}
+
+/** Склонение: «1 задачу», «2 задачи», «5 задач» */
+const ruTasksCountLabel = (n) => {
+  const abs = n % 100
+  const d = n % 10
+  if (abs > 10 && abs < 20) return `${n} задач`
+  if (d === 1) return `${n} задачу`
+  if (d >= 2 && d <= 4) return `${n} задачи`
+  return `${n} задач`
+}
+
+const getDependencyMeta = (task, tasks) => {
+  const parentId = task.dependsOnTaskId ?? null
+  const parent = parentId ? tasks.find((t) => t.id === parentId) : null
+  const dependents = tasks.filter((t) => (t.dependsOnTaskId ?? null) === task.id)
+  return {
+    isBlocked: Boolean(parentId),
+    isBlocking: dependents.length > 0,
+    blockingCount: dependents.length,
+    parentTitle: parent?.title ?? null,
+    dependents,
+  }
+}
+
+function TaskDependencyPanel({ task, tasks, compact }) {
+  const dep = getDependencyMeta(task, tasks)
+  const hasAny = dep.isBlocked || dep.isBlocking
+  if (compact) {
+    if (!hasAny) return null
+    return (
+      <div className="dep-compact" role="group" aria-label="Зависимости задачи">
+        {dep.isBlocked && (
+          <div className="dep-compact-line dep-compact-line--blocked">
+            <span aria-hidden>⛔</span>
+            <span> Заблокирована</span>
+            {dep.parentTitle && (
+              <>
+                {' · '}
+                <span className="dep-compact-wait">Ждёт: {dep.parentTitle}</span>
+              </>
+            )}
+          </div>
+        )}
+        {dep.isBlocking && (
+          <div
+            className={
+              dep.isBlocked
+                ? 'dep-compact-line dep-compact-line--blocking-secondary'
+                : 'dep-compact-line dep-compact-line--blocking'
+            }
+          >
+            <span aria-hidden>⚠️</span>
+            <span> Блокирует: {ruTasksCountLabel(dep.blockingCount)}</span>
+          </div>
+        )}
+      </div>
+    )
+  }
+  if (!hasAny) return null
+  return (
+    <div className="dep-stack" role="group" aria-label="Зависимости задачи">
+      {dep.isBlocked && (
+        <div className="dep-panel dep-panel--blocked">
+          <div className="dep-field-label">Статус</div>
+          <div className="dep-line dep-line--blocked-title">
+            <span className="dep-emoji" aria-hidden>
+              ⛔
+            </span>
+            <span className="dep-strong">Заблокирована</span>
+          </div>
+          {dep.parentTitle && (
+            <>
+              <div className="dep-field-label">Ждёт</div>
+              <div className="dep-wait-box">{dep.parentTitle}</div>
+            </>
+          )}
+        </div>
+      )}
+      {dep.isBlocking && (
+        <div
+          className={
+            dep.isBlocked ? 'dep-panel dep-panel--blocking dep-panel--secondary' : 'dep-panel dep-panel--blocking'
+          }
+        >
+          {!dep.isBlocked && (
+            <>
+              <div className="dep-field-label">Статус</div>
+              <div className="dep-line dep-line--blocking-title">
+                <span className="dep-emoji" aria-hidden>
+                  ⚠️
+                </span>
+                <span className="dep-strong">Блокирует: {ruTasksCountLabel(dep.blockingCount)}</span>
+              </div>
+            </>
+          )}
+          {dep.isBlocked && (
+            <div className="dep-line dep-line--blocking-secondary">
+              <span className="dep-emoji" aria-hidden>
+                ⚠️
+              </span>
+              <span className="dep-strong">Блокирует: {ruTasksCountLabel(dep.blockingCount)}</span>
+            </div>
+          )}
+          <div className="dep-field-label">Блокирует</div>
+          <div className="dep-chips">
+            {dep.dependents.map((d) => (
+              <span key={d.id} className="dep-chip">
+                {d.title}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -186,6 +384,7 @@ function App() {
   )
   const [milestonePlan, setMilestonePlan] = useState({})
   const [violatingTaskIds, setViolatingTaskIds] = useState([])
+  const [dependencyError, setDependencyError] = useState(null)
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -226,10 +425,37 @@ function App() {
     setProjects((prev) =>
       prev.map((project) => {
         if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((task) => (task.id === taskId ? { ...task, ...patch } : task)),
+        const oldTask = project.tasks.find((t) => t.id === taskId)
+        if (!oldTask) return project
+
+        if (patch.dependsOnTaskId !== undefined) {
+          if (
+            patch.dependsOnTaskId &&
+            wouldDependencyCreateCycle(project.tasks, taskId, patch.dependsOnTaskId)
+          ) {
+            setDependencyError(DEPENDENCY_CYCLE_MESSAGE)
+            return project
+          }
+          setDependencyError(null)
         }
+
+        let merged = { ...oldTask, ...patch }
+        let tasks = project.tasks.map((t) => (t.id === taskId ? merged : t))
+
+        if (patch.dependsOnTaskId !== undefined && merged.dependsOnTaskId) {
+          const parent = tasks.find((t) => t.id === merged.dependsOnTaskId)
+          if (parent) {
+            merged = rescheduleChildFromParent(parent, merged)
+            tasks = tasks.map((t) => (t.id === taskId ? merged : t))
+          }
+        }
+
+        /* Пересчёт зависимых только если реально изменился дедлайн родителя (не привязываемся к patch.deadline). */
+        if (merged.deadline !== oldTask.deadline) {
+          tasks = cascadeFsShiftFromParent(tasks, merged)
+        }
+
+        return { ...project, tasks }
       }),
     )
   }
@@ -238,18 +464,18 @@ function App() {
     setProjects((prev) =>
       prev.map((project) => {
         if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((task) =>
-            task.id === taskId
-              ? {
-                  ...task,
-                  startDate: shiftDate(task.startDate, days),
-                  deadline: shiftDate(task.deadline, days),
-                }
-              : task,
-          ),
+        const oldTask = project.tasks.find((t) => t.id === taskId)
+        if (!oldTask) return project
+        const merged = {
+          ...oldTask,
+          startDate: shiftDate(oldTask.startDate, days),
+          deadline: shiftDate(oldTask.deadline, days),
         }
+        let tasks = project.tasks.map((t) => (t.id === taskId ? merged : t))
+        if (merged.deadline !== oldTask.deadline) {
+          tasks = cascadeFsShiftFromParent(tasks, merged)
+        }
+        return { ...project, tasks }
       }),
     )
   }
@@ -259,14 +485,17 @@ function App() {
     setProjects((prev) =>
       prev.map((project) => {
         if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((task) =>
-            task.id === taskId
-              ? { ...task, deadline: shiftDate(task.startDate, safeDuration - 1) }
-              : task,
-          ),
+        const oldTask = project.tasks.find((t) => t.id === taskId)
+        if (!oldTask) return project
+        const merged = {
+          ...oldTask,
+          deadline: shiftDate(oldTask.startDate, safeDuration - 1),
         }
+        let tasks = project.tasks.map((t) => (t.id === taskId ? merged : t))
+        if (merged.deadline !== oldTask.deadline) {
+          tasks = cascadeFsShiftFromParent(tasks, merged)
+        }
+        return { ...project, tasks }
       }),
     )
   }
@@ -292,18 +521,20 @@ function App() {
     setProjects((prev) =>
       prev.map((project) => {
         if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((task) =>
-            idSet.has(task.id)
-              ? {
-                  ...task,
-                  startDate: shiftDate(task.startDate, days),
-                  deadline: shiftDate(task.deadline, days),
-                }
-              : task,
-          ),
+        let tasks = project.tasks.map((task) =>
+          idSet.has(task.id)
+            ? {
+                ...task,
+                startDate: shiftDate(task.startDate, days),
+                deadline: shiftDate(task.deadline, days),
+              }
+            : task,
+        )
+        for (const id of ids) {
+          const parent = tasks.find((t) => t.id === id)
+          if (parent) tasks = cascadeFsShiftFromParent(tasks, parent)
         }
+        return { ...project, tasks }
       }),
     )
   }
@@ -342,6 +573,7 @@ function App() {
       startDate: todayLocalDate(),
       deadline: newTask.deadline,
       milestoneId: newTask.milestoneId === ungroupedMilestoneId ? null : newTask.milestoneId,
+      dependsOnTaskId: null,
     }
     setProjects((prev) =>
       prev.map((project) =>
@@ -386,16 +618,22 @@ function App() {
   const todayTasks = sortedTasks.filter(
     (task) => diffDays(task.deadline, todayDateString) === 0 && task.status !== 'Готово',
   )
+  /** Дедлайн в ближайшие 7 дней включительно (0 = сегодня … 7 = через неделю). */
   const upcomingTasks = sortedTasks.filter((task) => {
-    const days = Math.round((toDate(task.deadline) - today) / dayMs)
-    return days > 0 && days <= 7 && task.status !== 'Готово'
+    if (task.status === 'Готово') return false
+    const d = diffDays(task.deadline, todayDateString)
+    return d >= 0 && d <= 7
   })
   const problematicTasks = sortedTasks.filter((task) => {
+    if (task.status === 'Готово') return false
     const noAssignee = !task.assignee
-    const overdue = toDate(task.deadline) < today && task.status !== 'Готово'
+    const overdue = toDate(task.deadline) < today
     const tooLongInProgress =
       task.status === 'В работе' && Math.round((today - toDate(task.startDate)) / dayMs) > 10
-    return noAssignee || overdue || tooLongInProgress
+    const d = diffDays(task.deadline, todayDateString)
+    const blocksOthersSoon =
+      getDependencyMeta(task, selectedProject.tasks).isBlocking && d >= 0 && d <= 7
+    return noAssignee || overdue || tooLongInProgress || blocksOthersSoon
   })
 
   const timelineRange = useMemo(() => {
@@ -421,6 +659,16 @@ function App() {
         <p>Центр управления сроками и задачами в режиме приоритета дедлайнов.</p>
       </header>
 
+      {dependencyError && (
+        <div
+          className="dependency-error-banner dependency-error-banner--sticky"
+          role="alert"
+          aria-live="assertive"
+        >
+          {dependencyError}
+        </div>
+      )}
+
       <section className="panel">
         <div className="panel-head">
           <h2>Проект</h2>
@@ -431,6 +679,7 @@ function App() {
               setSelectedTaskIds([])
               setBulkMoveTargetMilestoneId('')
               setViolatingTaskIds([])
+              setDependencyError(null)
             }}
           >
             {projects.map((project) => (
@@ -455,7 +704,7 @@ function App() {
           <p>{todayTasks.length}</p>
         </article>
         <article className="command-card ok">
-          <h3>Ближайшие (7 дн.)</h3>
+          <h3>Ближайшие</h3>
           <p>{upcomingTasks.length}</p>
         </article>
         <article className="command-card neutral">
@@ -468,7 +717,9 @@ function App() {
         <h2>Лента командного центра</h2>
         <div className="feed-grid">
           <div>
-            <h4>Просроченные</h4>
+            <h4>
+              <span aria-hidden>🔴</span> Просроченные
+            </h4>
             {overdueTasks.map((task) => (
               <div key={task.id} className="feed-row">
                 <span>{task.title}</span>
@@ -477,7 +728,9 @@ function App() {
             ))}
           </div>
           <div>
-            <h4>На сегодня</h4>
+            <h4>
+              <span aria-hidden>🟡</span> На сегодня
+            </h4>
             {todayTasks.map((task) => (
               <div key={task.id} className="feed-row">
                 <span>{task.title}</span>
@@ -495,15 +748,29 @@ function App() {
             ))}
           </div>
           <div>
-            <h4>Проблемные</h4>
-            {problematicTasks.map((task) => (
-              <div key={task.id} className="feed-row">
-                <span>{task.title}</span>
-                <span className="muted">
-                  {!task.assignee ? 'Нет исполнителя' : 'Требует внимания'}
-                </span>
-              </div>
-            ))}
+            <h4>
+              <span aria-hidden>🔥</span> Проблемные
+            </h4>
+            {problematicTasks.map((task) => {
+              const d = diffDays(task.deadline, todayDateString)
+              const dep = getDependencyMeta(task, selectedProject.tasks)
+              const blockingSoon = dep.isBlocking && d >= 0 && d <= 7
+              const overdue = toDate(task.deadline) < today
+              const longInProgress =
+                task.status === 'В работе' &&
+                Math.round((today - toDate(task.startDate)) / dayMs) > 10
+              let subtitle = 'Требует внимания'
+              if (!task.assignee) subtitle = 'Нет исполнителя'
+              else if (overdue) subtitle = 'Просрочено'
+              else if (longInProgress) subtitle = 'Долго в работе'
+              else if (blockingSoon) subtitle = 'Блокирует (срок ≤ 7 дн.)'
+              return (
+                <div key={task.id} className="feed-row">
+                  <span>{task.title}</span>
+                  <span className="muted">{subtitle}</span>
+                </div>
+              )
+            })}
           </div>
         </div>
       </section>
@@ -631,7 +898,6 @@ function App() {
               milestone.id,
             )
             const deadline = milestoneDeadline(milestone.id)
-            const issuePrefix = getProjectCode(selectedProject.name)
             const allSelected = tasks.length > 0 && tasks.every((t) => selectedTaskIds.includes(t.id))
 
             return (
@@ -710,24 +976,30 @@ function App() {
                             }}
                           />
                         </th>
-                        <th>Ключ</th>
                         <th>Задача</th>
                         <th>Статус</th>
                         <th>Исполнитель</th>
                         <th>Старт</th>
                         <th>Дедлайн</th>
                         <th>Веха</th>
+                        <th>Зависит от</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {tasks.map((task, index) => {
+                      {tasks.map((task) => {
                         const label = getDeadlineLabel(task.deadline)
                         const isViolation = violatingTaskIds.includes(task.id)
+                        const depMeta = getDependencyMeta(task, selectedProject.tasks)
+                        const depRowClass = depMeta.isBlocked
+                          ? 'task-row--dep-blocked'
+                          : depMeta.isBlocking
+                            ? 'task-row--dep-blocking'
+                            : ''
                         return (
                           <tr
                             key={task.id}
                             className={
-                              `${label === 'overdue' ? 'row-overdue' : ''} ${isViolation ? 'row-violation' : ''}`
+                              `${label === 'overdue' ? 'row-overdue' : ''} ${isViolation ? 'row-violation' : ''} ${depRowClass}`
                             }
                           >
                             <td>
@@ -738,10 +1010,10 @@ function App() {
                               />
                             </td>
                             <td>
-                              <span className="issue-key">{`${issuePrefix}-${index + 1}`}</span>
-                            </td>
-                            <td>
-                              <strong>{task.title}</strong>
+                              <div className="task-title-cell">
+                                <strong>{task.title}</strong>
+                                <TaskDependencyPanel task={task} tasks={selectedProject.tasks} />
+                              </div>
                             </td>
                             <td>
                               <div className="status-cell">
@@ -809,6 +1081,27 @@ function App() {
                                 ))}
                               </select>
                             </td>
+                            <td>
+                              <select
+                                className="dependency-select"
+                                value={task.dependsOnTaskId ?? ''}
+                                onChange={(event) =>
+                                  updateTask(task.id, {
+                                    dependsOnTaskId: event.target.value || null,
+                                  })
+                                }
+                                aria-label={`Зависимость для «${task.title}»`}
+                              >
+                                <option value="">Нет зависимости</option>
+                                {selectedProject.tasks
+                                  .filter((candidate) => candidate.id !== task.id)
+                                  .map((candidate) => (
+                                    <option key={candidate.id} value={candidate.id}>
+                                      {candidate.title}
+                                    </option>
+                                  ))}
+                              </select>
+                            </td>
                           </tr>
                         )
                       })}
@@ -832,10 +1125,17 @@ function App() {
             const left = (Math.max(0, diffDays(task.startDate, timelineRange.start)) / timelineRange.days) * 100
             const durationDays = Math.max(1, diffDays(task.deadline, task.startDate) + 1)
             const width = (durationDays / timelineRange.days) * 100
+            const depMeta = getDependencyMeta(task, selectedProject.tasks)
+            const timelineDepClass = depMeta.isBlocked
+              ? 'timeline-row--dep-blocked'
+              : depMeta.isBlocking
+                ? 'timeline-row--dep-blocking'
+                : ''
             return (
-              <div key={task.id} className="timeline-row">
+              <div key={task.id} className={`timeline-row ${timelineDepClass}`}>
                 <div className="timeline-meta">
                   <strong>{task.title}</strong>
+                  <TaskDependencyPanel task={task} tasks={selectedProject.tasks} compact />
                   <span className="muted">
                     {task.startDate} {'->'} {task.deadline}
                   </span>
