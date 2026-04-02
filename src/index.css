@@ -3,11 +3,158 @@
   --card-bg: #ffffff;
   --font-app: 'Mulish', system-ui, -apple-system, sans-serif;
   --heading-color: rgba(71, 71, 71, 1);
-  --tab-accent: rgba(96, 216, 18, 1);
+
+  /* Семантика: один смысл = один цвет */
+  --color-danger: #f2293a;
+  --color-primary: rgba(96, 216, 18, 1);
+  --color-warning: #f2bb13;
+  --color-problem: #ea580c;
+
+  --color-danger-bg: rgba(242, 41, 58, 0.12);
+  --color-primary-bg: rgba(96, 216, 18, 0.12);
+  --color-warning-bg: rgba(242, 187, 19, 0.18);
+  --color-problem-bg: rgba(234, 88, 12, 0.12);
+
+  --color-primary-strong: #3d7a12;
+  --color-on-warning: #854d0e;
+  --color-track-bg: #eceef2;
+
+  --tab-accent: var(--color-primary);
+
+  /* Референсы UI: Input field / Checkbox / Small button */
+  --radius-field: 8px;
+  --radius-checkbox: 4px;
+  /* Кнопки: уровень 1 — зелёная пилюля; уровень 2 — белая пилюля с обводкой (одинаковое скругление) */
+  --radius-button-pill: 22px;
+  --btn-height-pill: 44px;
+  --field-border: rgba(71, 71, 71, 0.15);
+  --color-checkbox-fill: #60d812;
+  --shadow-button-primary: 0 1px 2px rgba(10, 13, 18, 0.05);
+  /* Secondary button.svg: обводка + текст #474747 */
+  --btn-secondary-border: rgba(71, 71, 71, 0.4);
+  --btn-secondary-text: #474747;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Чекбокс: как в референсе — зелёный фон, белая галка (не системный accent) */
+input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  min-height: 15px;
+  margin: 0;
+  flex-shrink: 0;
+  border-radius: var(--radius-checkbox);
+  border: 1px solid rgba(71, 71, 71, 0.28);
+  background: var(--card-bg);
+  cursor: pointer;
+  vertical-align: middle;
+  position: relative;
+  box-sizing: border-box;
+}
+
+input[type='checkbox']:checked {
+  background-color: var(--color-checkbox-fill);
+  border-color: var(--color-checkbox-fill);
+}
+
+input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+input[type='checkbox']:focus-visible {
+  outline: 2px solid rgba(96, 216, 18, 0.45);
+  outline-offset: 2px;
+}
+
+input[type='checkbox']:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+input[type='radio'] {
+  accent-color: var(--color-checkbox-fill);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+/**
+ * Весь таск-трекер: поля, кнопки, скругления по референсам
+ * (Input field 8px + border / Checkbox / Small button)
+ */
+.app-shell textarea,
+.app-shell select,
+.app-shell input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='hidden']):not([type='color']):not([type='image']) {
+  border-radius: var(--radius-field);
+  border: 1px solid var(--field-border);
+  background: var(--card-bg);
+  color: inherit;
+  font: inherit;
+}
+
+.app-shell input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='hidden']):not([type='color']):not([type='image']),
+.app-shell select {
+  min-height: 40px;
+  padding: 8px 10px;
+}
+
+.app-shell textarea {
+  min-height: 80px;
+  padding: 10px 12px;
+}
+
+.app-shell textarea:focus-visible,
+.app-shell select:focus-visible,
+.app-shell input:focus-visible:not([type='checkbox']):not([type='radio']) {
+  outline: none;
+  border-color: rgba(96, 216, 18, 0.45);
+  box-shadow: 0 0 0 2px rgba(96, 216, 18, 0.2);
+}
+
+/* Кнопки: базовое скругление 8px (вторичный стиль); primary переопределяют классы */
+.app-shell button {
+  border-radius: var(--radius-field);
+  font: inherit;
+}
+
+.app-shell .project-tab,
+.app-shell .project-tab--overflow,
+.app-shell .project-tabs__overflow-item,
+.app-shell .task-open-btn,
+.app-shell .task-open-btn--completed,
+.app-shell .link-btn,
+.app-shell .milestone-completed__toggle {
+  border-radius: 0;
+}
+
+.app-shell .quick-add-main__input,
+.app-shell .task-panel__title-input {
+  border: none;
+  background: transparent;
+  min-height: unset;
+  padding: 8px 4px;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.app-shell .quick-add-main__input:focus-visible,
+.app-shell .task-panel__title-input:focus-visible {
+  outline: 2px solid rgba(96, 216, 18, 0.35);
+  outline-offset: 2px;
+  box-shadow: none;
+  border-color: transparent;
 }
 
 body {
