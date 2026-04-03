@@ -3,10 +3,20 @@
   --card-bg: #ffffff;
   --font-app: 'Mulish', system-ui, -apple-system, sans-serif;
   --heading-color: rgba(71, 71, 71, 1);
+  --color-text-main: rgba(71, 71, 71, 1);
+
+  /* Шкала отступов (кратно 4px) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
 
   /* Семантика: один смысл = один цвет */
   --color-danger: #f2293a;
   --color-primary: rgba(96, 216, 18, 1);
+  --color-primary-hover: #52c910;
   --color-warning: #f2bb13;
   --color-problem: #ea580c;
 
@@ -23,6 +33,7 @@
 
   /* Референсы UI: Input field / Checkbox / Small button */
   --radius-field: 8px;
+  --radius-btn-primary: 12px;
   --radius-checkbox: 4px;
   /* Кнопки: уровень 1 — зелёная пилюля; уровень 2 — белая пилюля с обводкой (одинаковое скругление) */
   --radius-button-pill: 22px;

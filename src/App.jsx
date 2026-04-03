@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import './App.css'
 
 const statusOptions = ['В работе', 'Готово']
@@ -237,6 +238,11 @@ const toLocalDateString = (date) => {
 }
 const todayLocalDate = () => toLocalDateString(new Date())
 const formatDate = (value) => toDate(value).toLocaleDateString('ru-RU')
+/** Короткая дата в строке задачи: «24 апр» */
+const formatTaskDateShort = (value) => {
+  if (!value) return '—'
+  return toDate(value).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
+}
 const diffDays = (a, b) => Math.round((toDate(a) - toDate(b)) / dayMs)
 const shiftDate = (dateString, days) => {
   const date = toDate(dateString)
@@ -378,6 +384,7 @@ const getDependencyMeta = (task, tasks) => {
     dependents,
   }
 }
+
 
 function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions, onAddAssignee }) {
   const titleInputId = useId()
@@ -799,6 +806,358 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
   )
 }
 
+/** Рендер в body + position:fixed — избегает наслоений из-за stacking context таблицы, transform на tr и соседних блоков */
+function TaskInlinePopoverPortal({ open, popoverRef, coords, className = '', children, ...rest }) {
+  if (!open) return null
+  return createPortal(
+    <div
+      ref={popoverRef}
+      className={`task-inline__popover task-inline__popover--portal ${className}`.trim()}
+      style={{
+        top: coords.top,
+        left: coords.left,
+        minWidth: coords.minWidth,
+      }}
+      {...rest}
+    >
+      {children}
+    </div>,
+    document.body
+  )
+}
+
+function useInlinePopover(options = {}) {
+  const minWidthFloor = options.minWidthFloor ?? 180
+  const [open, setOpen] = useState(false)
+  const anchorRef = useRef(null)
+  const popoverRef = useRef(null)
+  const [coords, setCoords] = useState({ top: 0, left: 0, minWidth: minWidthFloor })
+
+  const measure = useCallback(() => {
+    const el = anchorRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const mw = Math.max(minWidthFloor, Math.round(r.width))
+    const vw = window.innerWidth
+    const maxLeft = Math.max(8, vw - mw - 8)
+    const left = Math.min(Math.round(r.left), maxLeft)
+    setCoords({
+      top: Math.round(r.bottom + 4),
+      left,
+      minWidth: mw,
+    })
+  }, [minWidthFloor])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    measure()
+  }, [open, measure])
+
+  useEffect(() => {
+    if (!open) return
+    const onScroll = () => measure()
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onScroll)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onScroll)
+    }
+  }, [open, measure])
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e) => {
+      const t = e.target
+      if (anchorRef.current?.contains(t) || popoverRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    const onEsc = (e) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [open])
+
+  return { open, setOpen, anchorRef, popoverRef, coords, measure }
+}
+
+function statusLozengeClass(status, urgency) {
+  if (status === 'В работе') return 'status-lozenge status-progress'
+  if (status === 'Готово') return 'status-lozenge status-done'
+  return `status-lozenge status-lozenge--urgency-${urgency}`
+}
+
+function InlineTaskStatus({ taskId, status, statusOptions, updateTask, urgency = 'upcoming' }) {
+  const { open, setOpen, anchorRef, popoverRef, coords } = useInlinePopover()
+  return (
+    <div className="task-inline task-inline--status" ref={anchorRef} onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="task-inline__trigger task-inline__trigger--status"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
+        <span className={statusLozengeClass(status, urgency)}>{status}</span>
+      </button>
+      <TaskInlinePopoverPortal open={open} popoverRef={popoverRef} coords={coords} role="listbox" aria-label="Статус">
+        {statusOptions.map((s) => (
+          <button
+            key={s}
+            type="button"
+            role="option"
+            className={`task-inline__option${status === s ? ' task-inline__option--active' : ''}`}
+            onClick={() => {
+              updateTask(taskId, { status: s })
+              setOpen(false)
+            }}
+          >
+            {s}
+          </button>
+        ))}
+      </TaskInlinePopoverPortal>
+    </div>
+  )
+}
+
+function InlineTaskAssignee({ taskId, assignee, assigneeOptions, updateTask }) {
+  const { open, setOpen, anchorRef, popoverRef, coords } = useInlinePopover()
+  return (
+    <div className="task-inline task-inline--assignee" ref={anchorRef} onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="task-inline__trigger task-inline__trigger--assignee"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        title={assignee || 'Не назначен'}
+      >
+        <span className="avatar">{getInitials(assignee)}</span>
+        <span className="task-inline__assignee-name">{assignee || 'Не назначен'}</span>
+      </button>
+      <TaskInlinePopoverPortal
+        open={open}
+        popoverRef={popoverRef}
+        coords={coords}
+        className="task-inline__popover--assignee"
+        role="listbox"
+        aria-label="Исполнитель"
+      >
+        <button
+          type="button"
+          className="task-inline__option"
+          onClick={() => {
+            updateTask(taskId, { assignee: '' })
+            setOpen(false)
+          }}
+        >
+          Не назначен
+        </button>
+        {assigneeOptions.map((person) => (
+          <button
+            key={person}
+            type="button"
+            className="task-inline__option"
+            onClick={() => {
+              updateTask(taskId, { assignee: person })
+              setOpen(false)
+            }}
+          >
+            {person}
+          </button>
+        ))}
+      </TaskInlinePopoverPortal>
+    </div>
+  )
+}
+
+function InlineTaskDateField({ taskId, field, value, updateTask, deadlineLabel }) {
+  const { open, setOpen, anchorRef, popoverRef, coords } = useInlinePopover()
+  const inputRef = useRef(null)
+  const isDeadline = field === 'deadline'
+  useEffect(() => {
+    if (open) inputRef.current?.focus()
+  }, [open])
+  const tagClass = deadlineLabel ?? ''
+  const tagText = deadlineLabel ? getDeadlineLabelText(deadlineLabel) : ''
+  return (
+    <div className="task-inline task-inline--date" ref={anchorRef} onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="task-inline__trigger task-inline__trigger--date"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+      >
+        {isDeadline && <span className={`tag ${tagClass}`}>{tagText}</span>}
+        <span className="task-inline__date-text">{formatTaskDateShort(value)}</span>
+      </button>
+      <TaskInlinePopoverPortal
+        open={open}
+        popoverRef={popoverRef}
+        coords={coords}
+        className="task-inline__popover--date"
+        role="dialog"
+        aria-label={isDeadline ? 'Дедлайн' : 'Дата старта'}
+      >
+        <input
+          ref={inputRef}
+          type="date"
+          className="task-inline__date-input"
+          value={value}
+          onChange={(e) => {
+            updateTask(taskId, { [field]: e.target.value })
+            setOpen(false)
+          }}
+          aria-label={isDeadline ? 'Дедлайн' : 'Дата старта'}
+        />
+      </TaskInlinePopoverPortal>
+    </div>
+  )
+}
+
+function InlineTaskMilestone({ taskId, milestoneId, milestoneLabel, milestoneOptions, ungroupedId, updateTask }) {
+  const { open, setOpen, anchorRef, popoverRef, coords } = useInlinePopover()
+  return (
+    <div className="task-inline task-inline--milestone" ref={anchorRef} onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="task-inline__trigger task-inline__trigger--milestone"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
+        {milestoneLabel}
+      </button>
+      <TaskInlinePopoverPortal open={open} popoverRef={popoverRef} coords={coords} role="listbox" aria-label="Веха">
+        {milestoneOptions.map((m) => (
+          <button
+            key={m.id}
+            type="button"
+            role="option"
+            className={`task-inline__option${(milestoneId ?? ungroupedId) === m.id ? ' task-inline__option--active' : ''}`}
+            onClick={() => {
+              updateTask(taskId, {
+                milestoneId: m.id === ungroupedId ? null : m.id,
+              })
+              setOpen(false)
+            }}
+          >
+            {m.name}
+          </button>
+        ))}
+      </TaskInlinePopoverPortal>
+    </div>
+  )
+}
+
+function InlineTaskDependency({ taskId, dependsOnTaskId, candidates, tasks, updateTask }) {
+  const { open, setOpen, anchorRef, popoverRef, coords } = useInlinePopover({ minWidthFloor: 260 })
+  const [search, setSearch] = useState('')
+  const searchRef = useRef(null)
+  const parent = dependsOnTaskId ? tasks.find((t) => t.id === dependsOnTaskId) : null
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return candidates.filter((x) => !q || x.title.toLowerCase().includes(q))
+  }, [candidates, search])
+  useEffect(() => {
+    if (!open) setSearch('')
+  }, [open])
+  useEffect(() => {
+    if (open) searchRef.current?.focus()
+  }, [open])
+  return (
+    <div className="task-inline task-inline--dependency" ref={anchorRef} onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="task-inline__trigger task-inline__trigger--dependency"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        title={parent ? parent.title : 'Нет зависимости'}
+      >
+        <span className="task-inline__dependency-text">{parent ? parent.title : 'Нет зависимости'}</span>
+      </button>
+      <TaskInlinePopoverPortal
+        open={open}
+        popoverRef={popoverRef}
+        coords={coords}
+        className="task-inline__popover--dependency"
+        role="dialog"
+        aria-label="Зависимость"
+      >
+        <input
+          ref={searchRef}
+          type="search"
+          className="task-inline__dep-search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Поиск задачи"
+          aria-label="Поиск задачи"
+        />
+        <button
+          type="button"
+          className="task-inline__option"
+          onClick={() => {
+            updateTask(taskId, { dependsOnTaskId: null })
+            setOpen(false)
+          }}
+        >
+          Нет зависимости
+        </button>
+        <ul className="task-inline__dep-list">
+          {filtered.length === 0 ? (
+            <li className="task-inline__dep-empty">Нет задач</li>
+          ) : (
+            filtered.map((c) => (
+              <li key={c.id}>
+                <button
+                  type="button"
+                  className="task-inline__option"
+                  onClick={() => {
+                    updateTask(taskId, { dependsOnTaskId: c.id })
+                    setOpen(false)
+                  }}
+                >
+                  <span className="task-inline__dep-title">{c.title}</span>
+                  <span className="task-inline__dep-meta">{formatTaskDateShort(c.deadline)}</span>
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      </TaskInlinePopoverPortal>
+    </div>
+  )
+}
+
+function DepTagIconWaiting() {
+  return (
+    <svg className="dep-tag__svg" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M8 4.75v3.25l2.25 1.35" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function DepTagIconBlocks() {
+  return (
+    <svg className="dep-tag__svg" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M2.5 8h9M9.5 5.25L12 8l-2.5 2.75"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 function TaskDependencyPanel({ task, tasks, compact }) {
   const dep = getDependencyMeta(task, tasks)
   if (!dep.isBlocked && !dep.isBlocking) return null
@@ -806,19 +1165,29 @@ function TaskDependencyPanel({ task, tasks, compact }) {
     dep.dependents.length > 0 ? dep.dependents.map((d) => d.title).join(', ') : null
   return (
     <div
-      className={compact ? 'dep-lines dep-lines--compact' : 'dep-lines'}
+      className={`dep-tag${compact ? ' dep-tag--compact' : ''}`}
       role="group"
       aria-label="Зависимости задачи"
     >
       {dep.isBlocked && (
-        <div className="dep-line">
-          <span aria-hidden>⛔</span> Ждёт: {dep.parentTitle ?? '—'}
+        <div className="dep-tag__line">
+          <span className="dep-tag__icon" aria-hidden>
+            <DepTagIconWaiting />
+          </span>
+          <span className="dep-tag__text">
+            Ждёт <span className="dep-tag__emph">{dep.parentTitle ?? '—'}</span>
+          </span>
         </div>
       )}
       {dep.isBlocking && (
-        <div className="dep-line">
-          <span aria-hidden>⚠️</span> Блокирует: {ruTasksCountLabel(dep.blockingCount)}
-          {blockingTitles ? <span className="dep-line-names"> — {blockingTitles}</span> : null}
+        <div className="dep-tag__line">
+          <span className="dep-tag__icon" aria-hidden>
+            <DepTagIconBlocks />
+          </span>
+          <span className="dep-tag__text">
+            Блокирует {ruTasksCountLabel(dep.blockingCount)}
+            {blockingTitles ? <span className="dep-tag__names"> — {blockingTitles}</span> : null}
+          </span>
         </div>
       )}
     </div>
@@ -1083,7 +1452,7 @@ function TaskLightPanel({
         <div className="task-panel__body">
           <section className="task-panel__section">
             <div className="task-panel__section-head">
-              <h3>Описание</h3>
+              <h3 className="heading-h3">Описание</h3>
             </div>
             <textarea
               className="task-panel__description"
@@ -1096,7 +1465,7 @@ function TaskLightPanel({
 
           <section className="task-panel__section">
             <div className="task-panel__section-head">
-              <h3>Зависимости</h3>
+              <h3 className="heading-h3">Зависимости</h3>
               <button type="button" className="btn-secondary" onClick={() => setDepEditOpen((v) => !v)}>
                 Изменить
               </button>
@@ -1152,7 +1521,7 @@ function TaskLightPanel({
 
           <section className="task-panel__section">
             <div className="task-panel__section-head">
-              <h3>Комментарии</h3>
+              <h3 className="heading-h3">Комментарии</h3>
             </div>
             <input
               ref={fileInputRef}
@@ -1291,6 +1660,14 @@ function App() {
   const [showNewProjectModal, setShowNewProjectModal] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [openedTaskId, setOpenedTaskId] = useState(null)
+  const [editingMilestoneTitleId, setEditingMilestoneTitleId] = useState(null)
+  const [editingMilestoneTitleDraft, setEditingMilestoneTitleDraft] = useState('')
+  const [milestoneMenuOpenId, setMilestoneMenuOpenId] = useState(null)
+  const [addingMilestoneOpen, setAddingMilestoneOpen] = useState(false)
+  const [newMilestoneNameDraft, setNewMilestoneNameDraft] = useState('')
+  const addMilestoneInputRef = useRef(null)
+  const addMilestoneAnchorRef = useRef(null)
+  const newMilestoneFieldId = useId()
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -1307,6 +1684,32 @@ function App() {
       setSelectedProjectId(projects[0].id)
     }
   }, [projects, selectedProjectId])
+
+  useEffect(() => {
+    setEditingMilestoneTitleId(null)
+    setMilestoneMenuOpenId(null)
+    setAddingMilestoneOpen(false)
+    setNewMilestoneNameDraft('')
+  }, [selectedProjectId])
+
+  useEffect(() => {
+    if (!addingMilestoneOpen) return
+    addMilestoneAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const t = window.setTimeout(() => {
+      addMilestoneInputRef.current?.focus()
+    }, 380)
+    return () => window.clearTimeout(t)
+  }, [addingMilestoneOpen])
+
+  useEffect(() => {
+    if (!milestoneMenuOpenId) return
+    const onDoc = (e) => {
+      if (e.target.closest(`[data-milestone-menu-root="${milestoneMenuOpenId}"]`)) return
+      setMilestoneMenuOpenId(null)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [milestoneMenuOpenId])
 
   const switchProject = (id) => {
     setSelectedProjectId(id)
@@ -1744,6 +2147,82 @@ function App() {
     }
   }
 
+  const createMilestone = (rawName) => {
+    const name = rawName.trim()
+    if (!name) return
+    const id = `m-${Date.now()}`
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== selectedProjectId) return p
+        return { ...p, milestones: [...p.milestones, { id, name }] }
+      }),
+    )
+    setExpandedMilestonesByProject((prev) => ({
+      ...prev,
+      [selectedProjectId]: [...(prev[selectedProjectId] ?? []), id],
+    }))
+    setAddingMilestoneOpen(false)
+    setNewMilestoneNameDraft('')
+  }
+
+  const renameMilestone = (milestoneId, name) => {
+    const trimmed = name.trim()
+    if (!trimmed || milestoneId === ungroupedMilestoneId) return
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== selectedProjectId) return p
+        return {
+          ...p,
+          milestones: p.milestones.map((m) => (m.id === milestoneId ? { ...m, name: trimmed } : m)),
+        }
+      }),
+    )
+  }
+
+  const deleteMilestone = (milestoneId) => {
+    if (milestoneId === ungroupedMilestoneId) return
+    if (!window.confirm('Удалить веху? Задачи перейдут в «Без вехи».')) return
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== selectedProjectId) return p
+        return {
+          ...p,
+          milestones: p.milestones.filter((m) => m.id !== milestoneId),
+          tasks: p.tasks.map((t) =>
+            t.milestoneId === milestoneId ? { ...t, milestoneId: null } : t,
+          ),
+        }
+      }),
+    )
+    setMilestonePlan((prev) => {
+      const next = { ...prev }
+      delete next[milestoneId]
+      return next
+    })
+    setExpandedMilestonesByProject((prev) => ({
+      ...prev,
+      [selectedProjectId]: (prev[selectedProjectId] ?? []).filter((id) => id !== milestoneId),
+    }))
+    setMilestoneMenuOpenId(null)
+  }
+
+  const completeMilestoneTasks = (milestoneId) => {
+    const tasks = tasksByMilestone[milestoneId] ?? []
+    const active = tasks.filter((t) => t.status !== 'Готово')
+    if (active.length === 0) return
+    const ids = new Set(active.map((t) => t.id))
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== selectedProjectId) return p
+        return {
+          ...p,
+          tasks: p.tasks.map((t) => (ids.has(t.id) ? { ...t, status: 'Готово' } : t)),
+        }
+      }),
+    )
+    setMilestoneMenuOpenId(null)
+  }
+
   const sortedTasks = selectedProject
     ? selectedProject.tasks.slice().sort((a, b) => toDate(a.deadline) - toDate(b.deadline))
     : []
@@ -1798,11 +2277,22 @@ function App() {
       className={`app-shell${selectedActiveCount > 0 ? ' app-shell--bulk-open' : ''}`}
     >
       <header className="app-header">
-        <h1>Командный центр проекта</h1>
-        <p>Центр управления сроками и задачами в режиме приоритета дедлайнов.</p>
+        <h1 className="heading-h1">Командный центр проекта</h1>
+        <p className="app-header__subtitle">
+          Центр управления сроками и задачами в режиме приоритета дедлайнов.
+        </p>
       </header>
 
       <nav className="project-tabs" aria-label="Проекты">
+        <div className="section-header project-tabs__header">
+          <h2 className="heading-h2">Проекты</h2>
+          <button type="button" className="btn-primary" onClick={() => setShowNewProjectModal(true)}>
+            <span className="btn-primary__icon" aria-hidden>
+              +
+            </span>
+            Новый проект
+          </button>
+        </div>
         <div className="project-tabs__list">
           {primaryTabs.map((project) => (
             <button
@@ -1835,14 +2325,6 @@ function App() {
               </div>
             </details>
           )}
-          <button
-            type="button"
-            className="project-tab project-tab--add"
-            aria-label="Новый проект"
-            onClick={() => setShowNewProjectModal(true)}
-          >
-            +
-          </button>
         </div>
       </nav>
 
@@ -1866,31 +2348,33 @@ function App() {
         <div key={selectedProjectId} className="app-shell-content app-shell-content--fade">
       <section className="panel command-grid">
         <article className="command-card command-card--overdue">
-          <h3>Просроченные</h3>
+          <h3 className="heading-h3">Просроченные</h3>
           <p>{overdueTasks.length}</p>
         </article>
         <article className="command-card command-card--today">
-          <h3>На сегодня</h3>
+          <h3 className="heading-h3">На сегодня</h3>
           <p>{todayTasks.length}</p>
         </article>
         <article className="command-card command-card--upcoming">
-          <h3>Ближайшие</h3>
+          <h3 className="heading-h3">Ближайшие</h3>
           <p>{upcomingTasks.length}</p>
         </article>
         <article className="command-card command-card--problematic">
-          <h3>Проблемные</h3>
+          <h3 className="heading-h3">Проблемные</h3>
           <p>{problematicTasks.length}</p>
         </article>
       </section>
 
       <section className="panel">
-        <h2>Лента командного центра</h2>
+        <div className="section-header">
+          <h2 className="heading-h2">Лента командного центра</h2>
+        </div>
         <div className="feed-grid">
           <div className="feed-column feed-column--overdue">
-            <h4>
+            <h3 className="heading-h3 feed-column__head">
               <span className="feed-heading-dot feed-heading-dot--overdue" aria-hidden />
               Просроченные
-            </h4>
+            </h3>
             {overdueTasks.map((task) => (
               <div
                 key={task.id}
@@ -1903,10 +2387,10 @@ function App() {
             ))}
           </div>
           <div className="feed-column feed-column--today">
-            <h4>
+            <h3 className="heading-h3 feed-column__head">
               <span className="feed-heading-dot feed-heading-dot--today" aria-hidden />
               На сегодня
-            </h4>
+            </h3>
             {todayTasks.map((task) => (
               <div
                 key={task.id}
@@ -1919,10 +2403,10 @@ function App() {
             ))}
           </div>
           <div className="feed-column feed-column--upcoming">
-            <h4>
+            <h3 className="heading-h3 feed-column__head">
               <span className="feed-heading-dot feed-heading-dot--upcoming" aria-hidden />
               Ближайшие
-            </h4>
+            </h3>
             {upcomingTasks.map((task) => (
               <div
                 key={task.id}
@@ -1935,10 +2419,10 @@ function App() {
             ))}
           </div>
           <div className="feed-column feed-column--problematic">
-            <h4>
+            <h3 className="heading-h3 feed-column__head">
               <span className="feed-heading-dot feed-heading-dot--problematic" aria-hidden />
               Проблемные
-            </h4>
+            </h3>
             {problematicTasks.map((task) => {
               const d = diffDays(task.deadline, todayDateString)
               const dep = getDependencyMeta(task, selectedProject.tasks)
@@ -1967,8 +2451,20 @@ function App() {
         </div>
       </section>
 
-      <section className="panel">
-        <h2>Задачи по вехам (всегда в контексте проекта)</h2>
+      <section className="panel milestones-panel">
+        <div className="section-header">
+          <h2 className="heading-h2">Задачи по вехам</h2>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => {
+              setAddingMilestoneOpen(true)
+              setNewMilestoneNameDraft('')
+            }}
+          >
+            Новая веха
+          </button>
+        </div>
         <div className="stack">
           {groupedMilestones.map((milestone) => {
             const tasks = tasksByMilestone[milestone.id] ?? []
@@ -1978,56 +2474,205 @@ function App() {
               milestone.id,
             )
             const deadline = milestoneDeadline(milestone.id)
+            const overdueInMilestone = activeTasks.filter(
+              (t) => getDeadlineLabel(t.deadline) === 'overdue',
+            ).length
+            const deadlinePillKind = (() => {
+              if (!deadline) return 'none'
+              const d = diffDays(deadline, todayDateString)
+              if (d < 0) return 'past'
+              if (d === 0) return 'today'
+              if (d >= 1 && d <= 7) return 'soon'
+              return 'neutral'
+            })()
             const allSelected =
               activeTasks.length > 0 && activeTasks.every((t) => selectedTaskIds.includes(t.id))
             const completedKey = `${selectedProjectId}:${milestone.id}`
             const completedOpen = Boolean(expandedCompletedSections[completedKey])
+            const isUngrouped = milestone.id === ungroupedMilestoneId
+            const menuOpen = milestoneMenuOpenId === milestone.id
 
             return (
-              <article key={milestone.id} className="list-card static">
-                <div className="milestone-head">
-                  <button
-                    type="button"
-                    className="link-btn"
-                    onClick={() => toggleMilestoneExpanded(milestone.id)}
+              <article
+                key={milestone.id}
+                className="milestone-card"
+                onClick={() => {
+                  if (editingMilestoneTitleId === milestone.id) return
+                  toggleMilestoneExpanded(milestone.id)
+                }}
+              >
+                <header className="milestone-card__header">
+                  <div className="milestone-card__header-left">
+                    <button
+                      type="button"
+                      className="milestone-card__caret"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toggleMilestoneExpanded(milestone.id)
+                      }}
+                      aria-expanded={expanded}
+                      aria-label={expanded ? 'Свернуть веху' : 'Развернуть веху'}
+                    >
+                      {expanded ? '▾' : '▸'}
+                    </button>
+                    {editingMilestoneTitleId === milestone.id && !isUngrouped ? (
+                      <input
+                        className="milestone-card__title-input"
+                        value={editingMilestoneTitleDraft}
+                        onChange={(e) => setEditingMilestoneTitleDraft(e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        onBlur={() => {
+                          const t = editingMilestoneTitleDraft.trim()
+                          if (!t) {
+                            setEditingMilestoneTitleDraft(milestone.name)
+                            setEditingMilestoneTitleId(null)
+                            return
+                          }
+                          if (t !== milestone.name) renameMilestone(milestone.id, editingMilestoneTitleDraft)
+                          setEditingMilestoneTitleId(null)
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            e.preventDefault()
+                            setEditingMilestoneTitleId(null)
+                            setEditingMilestoneTitleDraft(milestone.name)
+                          }
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            renameMilestone(milestone.id, editingMilestoneTitleDraft)
+                            setEditingMilestoneTitleId(null)
+                          }
+                        }}
+                        autoFocus
+                        aria-label="Название вехи"
+                      />
+                    ) : (
+                      <h3 className="milestone-card__title heading-h3">
+                        <span className="milestone-card__title-text">{milestone.name}</span>
+                      </h3>
+                    )}
+                  </div>
+                  <div className="milestone-card__actions" onClick={(e) => e.stopPropagation()}>
+                    <div
+                      className="milestone-card__menu-root"
+                      data-milestone-menu-root={milestone.id}
+                    >
+                      <button
+                        type="button"
+                        className="milestone-card__menu-trigger"
+                        title="Меню вехи"
+                        aria-expanded={menuOpen}
+                        aria-haspopup="menu"
+                        onClick={() =>
+                          setMilestoneMenuOpenId((id) => (id === milestone.id ? null : milestone.id))
+                        }
+                      >
+                        ⋯
+                      </button>
+                      {menuOpen && (
+                        <div
+                          className="milestone-card__menu"
+                          role="menu"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {!isUngrouped && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="milestone-card__menu-item"
+                              onClick={() => {
+                                setMilestoneMenuOpenId(null)
+                                setEditingMilestoneTitleId(milestone.id)
+                                setEditingMilestoneTitleDraft(milestone.name)
+                              }}
+                            >
+                              Редактировать веху
+                            </button>
+                          )}
+                          {!isUngrouped && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="milestone-card__menu-item milestone-card__menu-item--danger"
+                              onClick={() => {
+                                setMilestoneMenuOpenId(null)
+                                deleteMilestone(milestone.id)
+                              }}
+                            >
+                              Удалить веху
+                            </button>
+                          )}
+                          <div className="milestone-card__menu-deadline">
+                            <span className="milestone-card__menu-deadline-label">Изменить дедлайн</span>
+                            <input
+                              type="date"
+                              className="milestone-card__menu-date"
+                              value={milestonePlan[milestone.id]?.target ?? (deadline ?? '')}
+                              onChange={(event) => {
+                                const nextTarget = event.target.value
+                                setMilestonePlan((prev) => ({
+                                  ...prev,
+                                  [milestone.id]: {
+                                    target: nextTarget,
+                                    mode: prev[milestone.id]?.mode ?? 'shift',
+                                  },
+                                }))
+                                applyMilestoneDeadlinePlan(milestone.id, nextTarget)
+                              }}
+                              aria-label="Целевой дедлайн вехи"
+                            />
+                          </div>
+                          {!isUngrouped && activeTasks.length > 0 && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="milestone-card__menu-item"
+                              onClick={() => completeMilestoneTasks(milestone.id)}
+                            >
+                              Завершить веху
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </header>
+
+                <div className="milestone-card__meta">
+                  <span
+                    className={`milestone-meta-pill milestone-meta-pill--deadline milestone-meta-pill--deadline-${deadlinePillKind}`}
                   >
-                    {expanded ? 'Скрыть' : 'Показать'}
-                  </button>
-                  <h3>{milestone.name}</h3>
-                  <span className="muted">
-                    Дедлайн (авто): {deadline ? formatDate(deadline) : 'Нет данных'}
+                    {deadline ? `📅 ${formatDate(deadline)}` : '📅 Нет дат'}
                   </span>
+                  <span className="milestone-meta-pill milestone-meta-pill--count">
+                    {ruTasksCountLabel(activeTasks.length)}
+                  </span>
+                  {overdueInMilestone > 0 && (
+                    <span className="milestone-meta-pill milestone-meta-pill--overdue-tasks">
+                      {overdueInMilestone} просрочено
+                    </span>
+                  )}
                 </div>
 
-                {milestone.id !== ungroupedMilestoneId && (
-                  <div className="toolbar compact">
-                    <label className="inline-control">
-                      План дедлайна вехи
-                      <input
-                        type="date"
-                        value={milestonePlan[milestone.id]?.target ?? (deadline ?? '')}
-                        onChange={(event) => {
-                          const nextTarget = event.target.value
-                          setMilestonePlan((prev) => ({
-                            ...prev,
-                            [milestone.id]: {
-                              target: nextTarget,
-                              mode: prev[milestone.id]?.mode ?? 'shift',
-                            },
-                          }))
-                          applyMilestoneDeadlinePlan(milestone.id, nextTarget)
-                        }}
-                      />
-                    </label>
-                  </div>
-                )}
-
                 {expanded && (
-                  <>
-                  <table className="issues-table">
+                  <div
+                    className="milestone-card__body"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                  <table className="issues-table issues-table--milestone">
+                    <colgroup>
+                      <col className="issues-table__col issues-table__col--check" />
+                      <col className="issues-table__col issues-table__col--title" />
+                      <col className="issues-table__col issues-table__col--status" />
+                      <col className="issues-table__col issues-table__col--assignee" />
+                      <col className="issues-table__col issues-table__col--start" />
+                      <col className="issues-table__col issues-table__col--due" />
+                      <col className="issues-table__col issues-table__col--milestone" />
+                      <col className="issues-table__col issues-table__col--dep" />
+                    </colgroup>
                     <thead>
                       <tr>
-                        <th>
+                        <th scope="col" className="issues-table__th issues-table__th--check">
                           <input
                             type="checkbox"
                             checked={allSelected}
@@ -2044,13 +2689,27 @@ function App() {
                             aria-label="Выбрать все активные задачи вехи"
                           />
                         </th>
-                        <th>Задача</th>
-                        <th>Статус</th>
-                        <th>Исполнитель</th>
-                        <th>Старт</th>
-                        <th>Дедлайн</th>
-                        <th>Веха</th>
-                        <th>Зависит от</th>
+                        <th scope="col" className="issues-table__th issues-table__th--title">
+                          Задача
+                        </th>
+                        <th scope="col" className="issues-table__th issues-table__th--center">
+                          Статус
+                        </th>
+                        <th scope="col" className="issues-table__th issues-table__th--center">
+                          Исполнитель
+                        </th>
+                        <th scope="col" className="issues-table__th issues-table__th--center">
+                          Старт
+                        </th>
+                        <th scope="col" className="issues-table__th issues-table__th--center">
+                          Дедлайн
+                        </th>
+                        <th scope="col" className="issues-table__th issues-table__th--center">
+                          Веха
+                        </th>
+                        <th scope="col" className="issues-table__th issues-table__th--center">
+                          Зависит от
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2064,127 +2723,96 @@ function App() {
                       activeTasks.map((task) => {
                         const label = getDeadlineLabel(task.deadline)
                         const isViolation = violatingTaskIds.includes(task.id)
-                        const depMeta = getDependencyMeta(task, selectedProject.tasks)
-                        const depRowClass = depMeta.isBlocked
-                          ? 'task-row--dep-blocked'
-                          : depMeta.isBlocking
-                            ? 'task-row--dep-blocking'
-                            : ''
                         const isSelected = selectedTaskIds.includes(task.id)
+                        const milestonePickerOptions = [
+                          { id: ungroupedMilestoneId, name: 'Без вехи' },
+                          ...selectedProject.milestones,
+                        ]
+                        const milestoneLabel =
+                          task.milestoneId == null
+                            ? 'Без вехи'
+                            : selectedProject.milestones.find((m) => m.id === task.milestoneId)?.name ?? '—'
+                        const depCandidates = selectedProject.tasks.filter((c) => c.id !== task.id)
                         return (
                           <tr
                             key={task.id}
-                            className={`issues-table__task-row ${label === 'overdue' ? 'row-overdue' : ''} ${isViolation ? 'row-violation' : ''} ${depRowClass} ${isSelected ? 'task-row--selected' : ''}`}
+                            className={`issues-table__task-row task-row--urgency-${label} ${isViolation ? 'row-violation' : ''} ${isSelected ? 'task-row--selected' : ''}`}
                             onClick={(e) => {
-                              if (e.target.closest('input, select, button, a')) return
+                              if (e.target.closest('input, select, button, a, .task-inline')) return
                               setOpenedTaskId(task.id)
                             }}
                           >
-                            <td>
+                            <td className="issues-table__td issues-table__td--check">
                               <input
                                 type="checkbox"
                                 checked={selectedTaskIds.includes(task.id)}
                                 onChange={() => toggleTaskSelection(task.id)}
                               />
                             </td>
-                            <td>
+                            <td className="issues-table__td issues-table__td--title">
                               <div className="task-title-cell">
                                 <span className="task-title-cell__title">{task.title}</span>
                                 <TaskDependencyPanel task={task} tasks={selectedProject.tasks} />
                               </div>
                             </td>
-                            <td>
-                              <div className="status-cell">
-                                <span className={`status-lozenge ${getStatusClass(task.status)}`}>
-                                  {task.status}
-                                </span>
-                                <select
-                                  value={task.status}
-                                  onChange={(event) => updateTask(task.id, { status: event.target.value })}
-                                >
-                                  {statusOptions.map((status) => (
-                                    <option key={status} value={status}>
-                                      {status}
-                                    </option>
-                                  ))}
-                                </select>
+                            <td className="issues-table__td issues-table__td--center">
+                              <div className="status-cell status-cell--inline">
+                                <InlineTaskStatus
+                                  taskId={task.id}
+                                  status={task.status}
+                                  statusOptions={statusOptions}
+                                  updateTask={updateTask}
+                                  urgency={label}
+                                />
                               </div>
                             </td>
-                            <td>
-                              <div className="assignee-cell">
-                                <span className="avatar">{getInitials(task.assignee)}</span>
-                                <select
-                                  value={task.assignee}
-                                  onChange={(event) => updateTask(task.id, { assignee: event.target.value })}
-                                >
-                                  <option value="">Не назначен</option>
-                                  {assigneeOptionsState.map((person) => (
-                                    <option key={person} value={person}>
-                                      {person}
-                                    </option>
-                                  ))}
-                                </select>
+                            <td className="issues-table__td issues-table__td--center">
+                              <div className="assignee-cell assignee-cell--inline">
+                                <InlineTaskAssignee
+                                  taskId={task.id}
+                                  assignee={task.assignee}
+                                  assigneeOptions={assigneeOptionsState}
+                                  updateTask={updateTask}
+                                />
                               </div>
                             </td>
-                            <td>
-                              <input
-                                type="date"
+                            <td className="issues-table__td issues-table__td--center">
+                              <InlineTaskDateField
+                                taskId={task.id}
+                                field="startDate"
                                 value={task.startDate}
-                                onChange={(event) => updateTask(task.id, { startDate: event.target.value })}
+                                updateTask={updateTask}
                               />
                             </td>
-                            <td>
-                              <div className="due-cell">
-                                <input
-                                  type="date"
+                            <td className="issues-table__td issues-table__td--center">
+                              <div className="due-cell due-cell--inline">
+                                <InlineTaskDateField
+                                  taskId={task.id}
+                                  field="deadline"
                                   value={task.deadline}
-                                  onChange={(event) => updateTask(task.id, { deadline: event.target.value })}
+                                  updateTask={updateTask}
+                                  deadlineLabel={label}
                                 />
-                                  <span className={`tag ${label}`}>
-                                    {getDeadlineLabelText(label)}
-                                  </span>
                               </div>
                             </td>
-                            <td>
-                              <select
-                                value={task.milestoneId ?? ungroupedMilestoneId}
-                                onChange={(event) =>
-                                  updateTask(task.id, {
-                                    milestoneId:
-                                      event.target.value === ungroupedMilestoneId
-                                        ? null
-                                        : event.target.value,
-                                  })
-                                }
-                              >
-                                <option value={ungroupedMilestoneId}>Без вехи</option>
-                                {selectedProject.milestones.map((m) => (
-                                  <option key={m.id} value={m.id}>
-                                    {m.name}
-                                  </option>
-                                ))}
-                              </select>
+                            <td className="issues-table__td issues-table__td--center">
+                              <InlineTaskMilestone
+                                taskId={task.id}
+                                milestoneId={task.milestoneId}
+                                milestoneLabel={milestoneLabel}
+                                milestoneOptions={milestonePickerOptions}
+                                ungroupedId={ungroupedMilestoneId}
+                                updateTask={updateTask}
+                              />
                             </td>
-                            <td>
-                              <select
-                                className="dependency-select"
-                                value={task.dependsOnTaskId ?? ''}
-                                onChange={(event) =>
-                                  updateTask(task.id, {
-                                    dependsOnTaskId: event.target.value || null,
-                                  })
-                                }
-                                aria-label={`Зависимость для «${task.title}»`}
-                              >
-                                <option value="">Нет зависимости</option>
-                                {selectedProject.tasks
-                                  .filter((candidate) => candidate.id !== task.id)
-                                  .map((candidate) => (
-                                    <option key={candidate.id} value={candidate.id}>
-                                      {candidate.title}
-                                    </option>
-                                  ))}
-                              </select>
+                            <td className="issues-table__td issues-table__td--center">
+                              <InlineTaskDependency
+                                taskId={task.id}
+                                dependsOnTaskId={task.dependsOnTaskId}
+                                candidates={depCandidates}
+                                tasks={selectedProject.tasks}
+                                updateTask={updateTask}
+                              />
                             </td>
                           </tr>
                         )
@@ -2300,16 +2928,64 @@ function App() {
                     assigneeOptions={assigneeOptionsState}
                     onAddAssignee={addAssigneeOption}
                   />
-                  </>
+                  </div>
                 )}
               </article>
             )
           })}
+          <div className="milestone-add-block" ref={addMilestoneAnchorRef}>
+            {!addingMilestoneOpen ? (
+              <button
+                type="button"
+                className="milestone-add-inline-trigger"
+                onClick={() => {
+                  setAddingMilestoneOpen(true)
+                  setNewMilestoneNameDraft('')
+                }}
+              >
+                Добавить веху
+              </button>
+            ) : (
+              <div className="milestone-add-panel">
+                <label className="milestone-add-panel__label" htmlFor={newMilestoneFieldId}>
+                  Новая веха
+                </label>
+                <p className="milestone-add-panel__hint">Введите название и нажмите Enter</p>
+                <form
+                  className="milestone-add-panel__form"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    createMilestone(newMilestoneNameDraft)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      setAddingMilestoneOpen(false)
+                      setNewMilestoneNameDraft('')
+                    }
+                  }}
+                >
+                  <input
+                    id={newMilestoneFieldId}
+                    ref={addMilestoneInputRef}
+                    className="milestone-add-panel__input"
+                    value={newMilestoneNameDraft}
+                    onChange={(e) => setNewMilestoneNameDraft(e.target.value)}
+                    placeholder="Например: Подготовка релиза"
+                    autoComplete="off"
+                    aria-label="Название новой вехи"
+                  />
+                </form>
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
       <section className="panel">
-        <h2>Таймлайн (MVP псевдо-гант)</h2>
+        <div className="section-header">
+          <h2 className="heading-h2">Таймлайн (MVP псевдо-гант)</h2>
+        </div>
         <div className="timeline-scale">
           <span>{timelineRange.start}</span>
           <span>{timelineRange.end}</span>
@@ -2319,19 +2995,13 @@ function App() {
             const left = (Math.max(0, diffDays(task.startDate, timelineRange.start)) / timelineRange.days) * 100
             const durationDays = Math.max(1, diffDays(task.deadline, task.startDate) + 1)
             const width = (durationDays / timelineRange.days) * 100
-            const depMeta = getDependencyMeta(task, selectedProject.tasks)
-            const timelineDepClass = depMeta.isBlocked
-              ? 'timeline-row--dep-blocked'
-              : depMeta.isBlocking
-                ? 'timeline-row--dep-blocking'
-                : ''
             const deadlineLabel = getDeadlineLabel(task.deadline)
             const isViolation = violatingTaskIds.includes(task.id)
             const timelineBarClass = isViolation
               ? 'timeline-bar--problem'
               : `timeline-bar--${deadlineLabel}`
             return (
-              <div key={task.id} className={`timeline-row ${timelineDepClass}`}>
+              <div key={task.id} className={`timeline-row timeline-row--urgency-${deadlineLabel}`}>
                 <div className="timeline-meta">
                   <button type="button" className="task-open-btn" onClick={() => setOpenedTaskId(task.id)}>
                     {task.title}
@@ -2374,7 +3044,10 @@ function App() {
         <div className="empty-projects">
           <p className="muted">Нет проектов</p>
           <button type="button" className="btn-primary empty-projects__btn" onClick={() => setShowNewProjectModal(true)}>
-            Создать проект
+            <span className="btn-primary__icon" aria-hidden>
+              +
+            </span>
+            Новый проект
           </button>
         </div>
       ) : null}
@@ -2407,7 +3080,9 @@ function App() {
             aria-labelledby="new-project-title"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="new-project-title">Новый проект</h3>
+            <h3 id="new-project-title" className="heading-h3">
+              Новый проект
+            </h3>
             <label className="project-modal__field">
               <span>Название</span>
               <input
