@@ -12,6 +12,128 @@
   padding-bottom: 100px;
 }
 
+/* Экран входа / подсказка про env (рендерится вне .app-shell) */
+.auth-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  box-sizing: border-box;
+}
+
+.auth-panel {
+  width: 100%;
+  max-width: 420px;
+  background: var(--card-bg);
+  border-radius: 16px;
+  padding: var(--space-6);
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
+}
+
+.auth-panel__head {
+  margin-bottom: var(--space-5);
+}
+
+.auth-panel__eyebrow {
+  margin: 0 0 var(--space-2);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.auth-panel__lede {
+  margin: 0;
+  font-size: 15.4px;
+  line-height: 1.5;
+  color: #6b7280;
+}
+
+.auth-inline-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(71, 71, 71, 0.08);
+  color: var(--heading-color);
+}
+
+.auth-steps {
+  margin: var(--space-4) 0 0;
+  padding-left: 1.25rem;
+  color: var(--color-text-main);
+  font-size: 15.4px;
+  line-height: 1.6;
+}
+
+.auth-steps li {
+  margin-bottom: var(--space-2);
+}
+
+.auth-panel__hint {
+  margin: var(--space-5) 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.auth-form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.auth-field {
+  display: grid;
+  gap: var(--space-2);
+  font-size: 14px;
+  color: var(--color-text-main);
+}
+
+.auth-field input {
+  border-radius: var(--radius-field);
+  border: 1px solid var(--field-border);
+  background: var(--card-bg);
+  color: inherit;
+  font: inherit;
+  min-height: 44px;
+  padding: 8px 12px;
+}
+
+.auth-field input:focus-visible {
+  outline: none;
+  border-color: rgba(96, 216, 18, 0.45);
+  box-shadow: 0 0 0 2px rgba(96, 216, 18, 0.2);
+}
+
+.auth-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: 14px;
+}
+
+.auth-error--multiline {
+  white-space: pre-line;
+  line-height: 1.45;
+}
+
+.auth-error--box {
+  padding: var(--space-3);
+  border-radius: var(--radius-field);
+  background: var(--color-danger-bg);
+  border: 1px solid rgba(242, 41, 58, 0.25);
+}
+
+.auth-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.auth-actions .btn-primary {
+  min-height: var(--btn-height-pill, 44px);
+  border-radius: var(--radius-button-pill, 22px);
+}
+
 /* Иерархия заголовков */
 .heading-h1 {
   margin: 0 0 var(--space-4);
@@ -63,6 +185,14 @@
 
 .project-tabs__header {
   margin-bottom: var(--space-3);
+}
+
+.project-tabs__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .project-tabs__header .heading-h2 {
@@ -251,7 +381,7 @@
 }
 
 /* Primary: единый стиль (иконка + текст) */
-:is(.app-shell, .add-user-modal) .btn-primary {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-primary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -270,26 +400,26 @@
   transition: background 0.12s ease, filter 0.12s ease;
 }
 
-:is(.app-shell, .add-user-modal) .btn-primary__icon {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-primary__icon {
   font-size: 19.8px;
   font-weight: 600;
   line-height: 1;
 }
 
-:is(.app-shell, .add-user-modal) .btn-primary:hover:not(:disabled) {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-primary:hover:not(:disabled) {
   background: var(--color-primary-hover);
 }
 
-:is(.app-shell, .add-user-modal) .btn-primary:active:not(:disabled) {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-primary:active:not(:disabled) {
   filter: brightness(0.92);
 }
 
-:is(.app-shell, .add-user-modal) .btn-primary:disabled {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-primary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-:is(.app-shell, .add-user-modal) .btn-primary:focus-visible {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-primary:focus-visible {
   outline: 2px solid rgba(96, 216, 18, 0.45);
   outline-offset: 2px;
 }
@@ -302,7 +432,7 @@
 }
 
 /* Уровень 2: вторичное — белая пилюля, обводка Secondary button.svg */
-:is(.app-shell, .add-user-modal) .btn-secondary {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-secondary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -322,12 +452,12 @@
   transition: background 0.12s ease, border-color 0.12s ease, filter 0.12s ease;
 }
 
-:is(.app-shell, .add-user-modal) .btn-secondary:hover {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-secondary:hover {
   background: #f9fafb;
   border-color: rgba(71, 71, 71, 0.55);
 }
 
-:is(.app-shell, .add-user-modal) .btn-secondary:focus-visible {
+:is(.app-shell, .add-user-modal, .auth-screen) .btn-secondary:focus-visible {
   outline: 2px solid rgba(96, 216, 18, 0.35);
   outline-offset: 2px;
 }
@@ -3647,7 +3777,7 @@ select.dependency-select {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  min-width: 240px;
+  min-width: 280px;
   padding: 8px 0;
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -3718,6 +3848,57 @@ select.dependency-select {
 
 .app-header-user__menu-item--danger {
   color: var(--color-danger);
+}
+
+.app-header-user__name-edit {
+  padding: 0 14px 12px;
+  border-bottom: 1px solid #f3f4f6;
+  margin-bottom: 4px;
+}
+
+.app-header-user__name-edit-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9ca3af;
+  margin-bottom: 6px;
+}
+
+.app-header-user__name-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14.3px;
+  color: #374151;
+}
+
+.app-header-user__name-input:focus {
+  outline: none;
+  border-color: var(--color-primary, #3b82f6);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.app-header-user__name-error {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--color-danger, #dc2626);
+}
+
+.app-header-user__name-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.app-header-user__name-btn {
+  padding: 6px 12px;
+  font-size: 13.5px;
 }
 
 @media (max-width: 520px) {
@@ -3840,6 +4021,10 @@ select.dependency-select {
   overflow: auto;
   background: #fff;
   max-height: min(70vh, 900px);
+  /* Не даём браузеру «подтягивать» скролл окна при изменении высоты блоков над гантом */
+  overflow-anchor: none;
+  /* Скролл колёсиком внутри ганта не уезжает на document */
+  overscroll-behavior: contain;
 }
 
 .gantt {

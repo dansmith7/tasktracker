@@ -1,16 +1,34 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { LoginScreen } from './components/LoginScreen.jsx'
+import { ProfileMissingScreen } from './components/ProfileMissingScreen.jsx'
+import { useAuth } from './contexts/AuthContext.jsx'
+import { useTrackerData } from './hooks/useTrackerData.js'
+import {
+  createMilestoneRemote,
+  createProjectRemote,
+  deleteCommentRemote,
+  deleteMilestoneRemote,
+  deleteTaskAttachmentRemote,
+  deleteTaskRemote,
+  deleteTasksBulkRemote,
+  formatSupabaseError,
+  insertCommentRemote,
+  persistProjectTasksDelta,
+  updateMilestoneDeadlineRemote,
+  updateMilestoneTitleRemote,
+  updateProfileNameRemote,
+  updateProjectTitleRemote,
+  updateTaskMilestoneRemote,
+  updateTasksStatusBulkRemote,
+  uploadTaskAttachment,
+} from './lib/trackerApi.js'
 import { ProjectGantt } from './ProjectGantt.jsx'
 import './App.css'
 
 const statusOptions = ['В работе', 'Готово']
-const assigneeOptions = ['Альберт', 'Данил', 'Алексей', 'Алиса', 'Руслан']
 const ungroupedMilestoneId = 'none'
 const dayMs = 1000 * 60 * 60 * 24
-
-const LS_USERS_KEY = 'tasktracker_users_v1'
-const LS_CURRENT_USER_KEY = 'tasktracker_currentUserId_v1'
-const LS_LAST_USER_KEY = 'tasktracker_lastUserId_v1'
 
 /** @param {string} userId */
 function mineFilterStorageKey(userId) {
@@ -27,6 +45,22 @@ function readMineFilterForUser(userId) {
   }
 }
 
+/** @param {AppUser[]} users */
+function findUserByName(users, rawName) {
+  const n = (rawName || '').trim()
+  if (!n) return null
+  const exact = users.find((u) => u.name === n)
+  if (exact) return exact
+  const lower = n.toLowerCase()
+  return users.find((u) => (u.name || '').trim().toLowerCase() === lower) ?? null
+}
+
+/** Значение для select исполнителя: id или подбор по имени (старые задачи). */
+function assigneeSelectValue(task, users) {
+  if (task.assigneeId) return task.assigneeId
+  return findUserByName(users, task.assignee)?.id ?? ''
+}
+
 /**
  * Идентификатор исполнителя: явный assigneeId или пользователь по имени assignee.
  * @param {Task} task
@@ -36,72 +70,18 @@ function resolveTaskAssigneeId(task, users) {
   if (task.assigneeId) return task.assigneeId
   const name = (task.assignee || '').trim()
   if (!name) return null
-  return users.find((u) => u.name === name)?.id ?? null
+  return findUserByName(users, name)?.id ?? null
+}
+
+/** Для колонки «Проблемные»: исполнитель есть, если в задаче указано имя или id (даже если имя не совпало с profiles). */
+function taskHasAssigneeDisplay(task) {
+  if (task.assigneeId) return true
+  return Boolean((task.assignee || '').trim())
 }
 
 const USER_AVATAR_COLORS = ['#60d812', '#3b82f6', '#a855f7', '#f59e0b', '#ec4899', '#14b8a6']
 
 /** @typedef {{ id: string, name: string, avatarColor?: string, avatarUrl?: string }} AppUser */
-
-function buildSeedUsers() {
-  return assigneeOptions.map((name, i) => ({
-    id: `u-seed-${i}`,
-    name,
-    avatarColor: USER_AVATAR_COLORS[i % USER_AVATAR_COLORS.length],
-  }))
-}
-
-function loadUsersFromStorage() {
-  try {
-    const raw = localStorage.getItem(LS_USERS_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return null
-    return parsed.filter((u) => u && typeof u.id === 'string' && typeof u.name === 'string')
-  } catch {
-    return null
-  }
-}
-
-function saveUsersToStorage(list) {
-  try {
-    localStorage.setItem(LS_USERS_KEY, JSON.stringify(list))
-  } catch {
-    /* ignore */
-  }
-}
-
-function readStoredUserId(key) {
-  try {
-    return localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
-
-function initAppSession() {
-  const list = loadUsersFromStorage()
-  const users = list && list.length > 0 ? list : buildSeedUsers()
-  let currentId = readStoredUserId(LS_CURRENT_USER_KEY)
-  if (currentId && !users.some((u) => u.id === currentId)) {
-    try {
-      localStorage.removeItem(LS_CURRENT_USER_KEY)
-    } catch {
-      /* ignore */
-    }
-    currentId = null
-  }
-  let lastId = readStoredUserId(LS_LAST_USER_KEY)
-  if (lastId && !users.some((u) => u.id === lastId)) {
-    try {
-      localStorage.removeItem(LS_LAST_USER_KEY)
-    } catch {
-      /* ignore */
-    }
-    lastId = null
-  }
-  return { users, currentUserId: currentId, lastUserId: lastId }
-}
 
 const TASK_PRIORITY_OPTIONS = [
   { id: 'high', label: 'Высокий' },
@@ -230,138 +210,6 @@ function readFileForProgress(file, onProgress) {
  * @property {string} [updatedBy]
  * @property {{ id: string, author: string, authorId?: string, time: string, text: string }[]} [comments]
  */
-
-const seedProjects = [
-  {
-    id: 'p1',
-    name: 'Перезапуск сайта',
-    milestones: [
-      { id: 'm1', name: 'Планирование' },
-      { id: 'm2', name: 'Разработка' },
-      { id: 'm3', name: 'Запуск' },
-    ],
-    tasks: [
-      {
-        id: 't1',
-        title: 'Определить объем работ',
-        status: 'Готово',
-        assignee: 'Альберт',
-        assigneeId: 'u-seed-0',
-        startDate: '2026-03-20',
-        deadline: '2026-03-23',
-        milestoneId: 'm1',
-        priority: 'medium',
-        dependsOnTaskId: null,
-      },
-      {
-        id: 't2',
-        title: 'Согласование со стейкхолдерами',
-        status: 'В работе',
-        assignee: 'Данил',
-        assigneeId: 'u-seed-1',
-        startDate: '2026-03-25',
-        deadline: '2026-04-02',
-        milestoneId: 'm1',
-        priority: 'high',
-        dependsOnTaskId: null,
-      },
-      /* Тест A→B (ручной сдвиг дедлайна A: должна сдвинуться B). A: 1–3.04, B: 4–6.04.2026 */
-      {
-        id: 't3',
-        title: 'Сверстать лендинг',
-        status: 'В работе',
-        assignee: 'Алиса',
-        assigneeId: 'u-seed-3',
-        startDate: '2026-04-01',
-        deadline: '2026-04-03',
-        milestoneId: 'm2',
-        priority: 'medium',
-        dependsOnTaskId: null,
-      },
-      {
-        id: 't4',
-        title: 'Подключить аналитику',
-        status: 'В работе',
-        assignee: '',
-        startDate: '2026-04-04',
-        deadline: '2026-04-06',
-        milestoneId: 'm2',
-        priority: 'low',
-        dependsOnTaskId: 't3',
-      },
-      /* Цепочка A(t3)→B(t4)→C: сдвиг A на +2 дня тянет B, затем C */
-      {
-        id: 't4b',
-        title: 'Интеграция формы (цепочка C)',
-        status: 'В работе',
-        assignee: '',
-        startDate: '2026-04-07',
-        deadline: '2026-04-09',
-        milestoneId: 'm2',
-        priority: 'low',
-        dependsOnTaskId: 't4',
-      },
-      {
-        id: 't5',
-        title: 'Финальная проверка текстов',
-        status: 'В работе',
-        assignee: 'Руслан',
-        assigneeId: 'u-seed-4',
-        startDate: '2026-04-05',
-        deadline: '2026-04-10',
-        milestoneId: null,
-        priority: 'medium',
-        dependsOnTaskId: null,
-      },
-    ],
-  },
-  {
-    id: 'p2',
-    name: 'MVP мобильного приложения',
-    milestones: [
-      { id: 'm4', name: 'Ключевые сценарии' },
-      { id: 'm5', name: 'Подготовка релиза' },
-    ],
-    tasks: [
-      {
-        id: 't6',
-        title: 'Поток входа',
-        status: 'В работе',
-        assignee: 'Алиса',
-        assigneeId: 'u-seed-3',
-        startDate: '2026-03-28',
-        deadline: '2026-04-01',
-        milestoneId: 'm4',
-        priority: 'high',
-        dependsOnTaskId: null,
-      },
-      {
-        id: 't7',
-        title: 'Экран списка задач',
-        status: 'В работе',
-        assignee: 'Алексей',
-        assigneeId: 'u-seed-2',
-        startDate: '2026-04-01',
-        deadline: '2026-04-05',
-        milestoneId: 'm4',
-        priority: 'medium',
-        dependsOnTaskId: null,
-      },
-      {
-        id: 't8',
-        title: 'Чеклист QA',
-        status: 'В работе',
-        assignee: 'Данил',
-        assigneeId: 'u-seed-1',
-        startDate: '2026-04-05',
-        deadline: '2026-04-10',
-        milestoneId: 'm5',
-        priority: 'low',
-        dependsOnTaskId: null,
-      },
-    ],
-  },
-]
 
 const toDate = (value) => new Date(`${value}T00:00:00`)
 const dateOnly = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate())
@@ -604,134 +452,25 @@ const getDependencyMeta = (task, tasks) => {
   }
 }
 
-function UserPickerScreen({ users, lastUserId, onSelectUser, onOpenAddUser, onContinueAsLast }) {
-  const lastUser = lastUserId ? users.find((u) => u.id === lastUserId) : null
-  return (
-    <div className="user-picker">
-      <div className="user-picker__panel">
-        <h1 className="user-picker__title heading-h1">Кто вы?</h1>
-        <p className="user-picker__subtitle muted">Выберите пользователя для продолжения</p>
-        {lastUser && (
-          <button
-            type="button"
-            className="btn-primary user-picker__continue"
-            onClick={() => onContinueAsLast(lastUser.id)}
-          >
-            Продолжить как {lastUser.name}
-          </button>
-        )}
-        <div className="user-picker__grid">
-          {users.map((u) => (
-            <button key={u.id} type="button" className="user-card" onClick={() => onSelectUser(u.id)}>
-              <span className="user-card__avatar" style={{ background: u.avatarColor ?? '#9ca3af' }}>
-                {u.avatarUrl ? (
-                  <img src={u.avatarUrl} alt="" className="user-card__avatar-img" />
-                ) : (
-                  getInitials(u.name)
-                )}
-              </span>
-              <span className="user-card__name">{u.name}</span>
-            </button>
-          ))}
-          <button type="button" className="user-card user-card--add" onClick={onOpenAddUser}>
-            <span className="user-card__add-icon" aria-hidden>
-              +
-            </span>
-            <span className="user-card__name">Добавить</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AddUserModal({ open, onClose, onSubmit, error }) {
-  const [name, setName] = useState('')
-  const [color, setColor] = useState(USER_AVATAR_COLORS[0])
-  useEffect(() => {
-    if (!open) return
-    setName('')
-    setColor(USER_AVATAR_COLORS[Math.floor(Math.random() * USER_AVATAR_COLORS.length)])
-  }, [open])
-  if (!open) return null
-  const trySubmit = () => {
-    if (onSubmit(name, color)) onClose()
-  }
-  return (
-    <div
-      className="add-user-modal-backdrop"
-      role="presentation"
-      onClick={onClose}
-    >
-      <div
-        className="add-user-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="add-user-title"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose()
-        }}
-      >
-        <div className="add-user-modal__head">
-          <p className="add-user-modal__eyebrow">Команда</p>
-          <h2 id="add-user-title" className="heading-h3 add-user-modal__title">
-            Новый пользователь
-          </h2>
-          <p className="add-user-modal__lede">Имя будет использоваться в задачах и в списке участников.</p>
-        </div>
-        <label className="add-user-modal__field">
-          <span>Имя</span>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Как к вам обращаться"
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                trySubmit()
-              }
-            }}
-          />
-        </label>
-        <div className="add-user-modal__field add-user-modal__field--compact">
-          <span>Цвет аватара</span>
-          <div className="add-user-modal__colors" role="group" aria-label="Цвет аватара">
-            {USER_AVATAR_COLORS.map((c) => (
-              <button
-                key={c}
-                type="button"
-                className={`add-user-modal__color-dot${color === c ? ' add-user-modal__color-dot--active' : ''}`}
-                style={{ background: c }}
-                onClick={() => setColor(c)}
-                aria-label={`Цвет ${c}`}
-                aria-pressed={color === c}
-              />
-            ))}
-          </div>
-        </div>
-        {error ? (
-          <p className="add-user-modal__error" role="alert">
-            {error}
-          </p>
-        ) : null}
-        <div className="add-user-modal__actions">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Отмена
-          </button>
-          <button type="button" className="btn-primary" onClick={trySubmit}>
-            Создать
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function CurrentUserMenu({ currentUser, users, onSwitchUser, onChangeUser, onOpenAddUser }) {
+function CurrentUserMenu({ currentUser, onSignOut, onSaveDisplayName }) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const [nameEditOpen, setNameEditOpen] = useState(false)
+  const [nameDraft, setNameDraft] = useState(currentUser.name)
+  const [nameSaving, setNameSaving] = useState(false)
+  const [nameError, setNameError] = useState(null)
   const rootRef = useRef(null)
+
+  useEffect(() => {
+    setNameDraft(currentUser.name)
+  }, [currentUser.name])
+
+  useEffect(() => {
+    if (!menuOpen) {
+      setNameEditOpen(false)
+      setNameError(null)
+    }
+  }, [menuOpen])
+
   useEffect(() => {
     if (!menuOpen) return
     const onDoc = (e) => {
@@ -740,7 +479,27 @@ function CurrentUserMenu({ currentUser, users, onSwitchUser, onChangeUser, onOpe
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [menuOpen])
-  const others = users.filter((u) => u.id !== currentUser.id)
+
+  const saveDisplayName = async () => {
+    const t = nameDraft.trim()
+    if (!t) {
+      setNameError('Введите имя')
+      return
+    }
+    setNameSaving(true)
+    setNameError(null)
+    try {
+      await onSaveDisplayName(t)
+      setNameEditOpen(false)
+      setMenuOpen(false)
+    } catch (e) {
+      console.error(e)
+      setNameError(formatSupabaseError(e))
+    } finally {
+      setNameSaving(false)
+    }
+  }
+
   return (
     <div className="app-header-user" ref={rootRef}>
       <button
@@ -771,51 +530,76 @@ function CurrentUserMenu({ currentUser, users, onSwitchUser, onChangeUser, onOpe
             <span className="app-header-user__menu-label">Сейчас</span>
             <span className="app-header-user__menu-strong">{currentUser.name}</span>
           </div>
-          {others.map((u) => (
+          {nameEditOpen ? (
+            <div className="app-header-user__name-edit">
+              <label className="app-header-user__name-edit-label" htmlFor="user-display-name-input">
+                Имя в системе
+              </label>
+              <input
+                id="user-display-name-input"
+                type="text"
+                className="app-header-user__name-input"
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                placeholder="Например, Данил"
+                autoComplete="name"
+                disabled={nameSaving}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveDisplayName()
+                }}
+              />
+              {nameError ? (
+                <p className="app-header-user__name-error" role="alert">
+                  {nameError}
+                </p>
+              ) : null}
+              <div className="app-header-user__name-actions">
+                <button
+                  type="button"
+                  className="btn-secondary app-header-user__name-btn"
+                  disabled={nameSaving}
+                  onClick={() => {
+                    setNameEditOpen(false)
+                    setNameDraft(currentUser.name)
+                    setNameError(null)
+                  }}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary app-header-user__name-btn"
+                  disabled={nameSaving}
+                  onClick={() => void saveDisplayName()}
+                >
+                  {nameSaving ? 'Сохранение…' : 'Сохранить'}
+                </button>
+              </div>
+            </div>
+          ) : (
             <button
-              key={u.id}
               type="button"
               role="menuitem"
-              className="app-header-user__menu-item"
+              className="app-header-user__menu-item app-header-user__menu-item--action"
               onClick={() => {
-                onSwitchUser(u.id)
-                setMenuOpen(false)
+                setNameEditOpen(true)
+                setNameDraft(currentUser.name)
+                setNameError(null)
               }}
             >
-              <span
-                className="app-header-user__menu-avatar"
-                style={{ background: u.avatarColor ?? '#9ca3af' }}
-              >
-                {u.avatarUrl ? (
-                  <img src={u.avatarUrl} alt="" className="app-header-user__avatar-img" />
-                ) : (
-                  getInitials(u.name)
-                )}
-              </span>
-              {u.name}
+              Изменить имя
             </button>
-          ))}
-          <button
-            type="button"
-            role="menuitem"
-            className="app-header-user__menu-item app-header-user__menu-item--action"
-            onClick={() => {
-              onOpenAddUser()
-              setMenuOpen(false)
-            }}
-          >
-            + Добавить пользователя
-          </button>
+          )}
           <button
             type="button"
             role="menuitem"
             className="app-header-user__menu-item app-header-user__menu-item--danger"
             onClick={() => {
-              onChangeUser()
+              onSignOut()
               setMenuOpen(false)
             }}
           >
-            Сменить пользователя
+            Выйти
           </button>
         </div>
       )}
@@ -823,12 +607,12 @@ function CurrentUserMenu({ currentUser, users, onSwitchUser, onChangeUser, onOpe
   )
 }
 
-function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions, onAddAssignee }) {
+function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeUsers }) {
   const titleInputId = useId()
 
   const [collapsed, setCollapsed] = useState(true)
   const [title, setTitle] = useState('')
-  const [assignee, setAssignee] = useState('')
+  const [assigneeUserId, setAssigneeUserId] = useState('')
   const [deadline, setDeadline] = useState(todayDateString)
   const [dependsOnTaskId, setDependsOnTaskId] = useState(null)
   const [dueOpen, setDueOpen] = useState(false)
@@ -837,7 +621,6 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
   const [depSearch, setDepSearch] = useState('')
   /** Пока false — в pill показываем «Срок», дедлайн по умолчанию всё равно сегодня */
   const [dueTouched, setDueTouched] = useState(false)
-  const [newAssigneeName, setNewAssigneeName] = useState('')
   const titleRef = useRef(null)
   const dueWrapRef = useRef(null)
   const assigneeWrapRef = useRef(null)
@@ -894,7 +677,7 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
   }
 
   const clearExtras = () => {
-    setAssignee('')
+    setAssigneeUserId('')
     setDependsOnTaskId(null)
     setDeadline(todayDateString)
     setDueTouched(false)
@@ -906,13 +689,13 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
     if (!title.trim()) return
     onCreate({
       title: title.trim(),
-      assignee: assignee.trim(),
+      assigneeUserId: assigneeUserId || null,
       deadline,
       dependsOnTaskId,
       comment: '',
     })
     setTitle('')
-    setAssignee('')
+    setAssigneeUserId('')
     setDependsOnTaskId(null)
     setDeadline(todayDateString)
     setDueTouched(false)
@@ -937,7 +720,7 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
     }
     const hasTitle = Boolean(title.trim())
     const hasExtras =
-      Boolean(assignee.trim()) ||
+      Boolean(assigneeUserId) ||
       Boolean(dependsOnTaskId) ||
       dueTouched ||
       deadline !== todayDateString
@@ -1098,15 +881,17 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
                   👤
                 </span>
                 <span className="quick-add-pill__text">
-                  {assignee.trim() ? assignee.trim() : 'Исполнитель'}
+                  {assigneeUserId
+                    ? assigneeUsers.find((u) => u.id === assigneeUserId)?.name ?? 'Исполнитель'
+                    : 'Исполнитель'}
                 </span>
               </button>
               {assigneeOpen && (
                 <div className="quick-add-popover quick-add-popover--assignee" role="dialog" aria-label="Исполнитель">
                   <select
                     className="quick-add-popover__assignee-input"
-                    value={assignee}
-                    onChange={(e) => setAssignee(e.target.value)}
+                    value={assigneeUserId}
+                    onChange={(e) => setAssigneeUserId(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') {
                         e.stopPropagation()
@@ -1116,43 +901,12 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeOptions
                     aria-label="Исполнитель"
                   >
                     <option value="">Не назначен</option>
-                    {assigneeOptions.map((person) => (
-                      <option key={person} value={person}>
-                        {person}
+                    {assigneeUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name}
                       </option>
                     ))}
                   </select>
-                  <div className="quick-add-popover__assignee-add">
-                    <input
-                      className="quick-add-popover__assignee-new"
-                      value={newAssigneeName}
-                      placeholder="Добавить исполнителя"
-                      onChange={(e) => setNewAssigneeName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          const added = onAddAssignee(newAssigneeName)
-                          if (added) {
-                            setAssignee(added)
-                            setNewAssigneeName('')
-                          }
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="quick-add-popover__assignee-add-btn"
-                      onClick={() => {
-                        const added = onAddAssignee(newAssigneeName)
-                        if (added) {
-                          setAssignee(added)
-                          setNewAssigneeName('')
-                        }
-                      }}
-                    >
-                      Добавить
-                    </button>
-                  </div>
                 </div>
               )}
             </div>
@@ -1361,8 +1115,11 @@ function InlineTaskStatus({ taskId, status, statusOptions, updateTask, urgency =
   )
 }
 
-function InlineTaskAssignee({ taskId, assignee, assigneeOptions, updateTask }) {
+function InlineTaskAssignee({ taskId, task, users, updateTask }) {
   const { open, setOpen, anchorRef, popoverRef, coords } = useInlinePopover()
+  const resolved = task.assigneeId ? users.find((u) => u.id === task.assigneeId) : null
+  const assigneeTrimmed = (task.assignee || '').trim()
+  const displayName = resolved?.name ?? (assigneeTrimmed || 'Не назначен')
   return (
     <div className="task-inline task-inline--assignee" ref={anchorRef} onClick={(e) => e.stopPropagation()}>
       <button
@@ -1371,10 +1128,10 @@ function InlineTaskAssignee({ taskId, assignee, assigneeOptions, updateTask }) {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-haspopup="listbox"
-        title={assignee || 'Не назначен'}
+        title={displayName}
       >
-        <span className="avatar">{getInitials(assignee)}</span>
-        <span className="task-inline__assignee-name">{assignee || 'Не назначен'}</span>
+        <span className="avatar">{getInitials(resolved?.name ?? task.assignee ?? '?')}</span>
+        <span className="task-inline__assignee-name">{displayName}</span>
       </button>
       <TaskInlinePopoverPortal
         open={open}
@@ -1388,23 +1145,23 @@ function InlineTaskAssignee({ taskId, assignee, assigneeOptions, updateTask }) {
           type="button"
           className="task-inline__option"
           onClick={() => {
-            updateTask(taskId, { assignee: '' })
+            updateTask(taskId, { assigneeUserId: null })
             setOpen(false)
           }}
         >
           Не назначен
         </button>
-        {assigneeOptions.map((person) => (
+        {users.map((u) => (
           <button
-            key={person}
+            key={u.id}
             type="button"
             className="task-inline__option"
             onClick={() => {
-              updateTask(taskId, { assignee: person })
+              updateTask(taskId, { assigneeUserId: u.id })
               setOpen(false)
             }}
           >
-            {person}
+            {u.name}
           </button>
         ))}
       </TaskInlinePopoverPortal>
@@ -1501,7 +1258,10 @@ function InlineTaskDependency({ taskId, dependsOnTaskId, candidates, tasks, upda
     return candidates.filter((x) => !q || x.title.toLowerCase().includes(q))
   }, [candidates, search])
   useEffect(() => {
-    if (!open) setSearch('')
+    if (!open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- сброс поиска при закрытии
+      setSearch('')
+    }
   }, [open])
   useEffect(() => {
     if (open) searchRef.current?.focus()
@@ -1633,12 +1393,15 @@ function TaskDependencyPanel({ task, tasks, compact }) {
 function TaskLightPanel({
   task,
   tasks,
+  projectId,
   projectName,
-  assigneeOptions,
+  assigneeUsers,
   currentUser,
+  supabase,
   onUpdateTask,
   onDeleteTask,
   onClose,
+  refresh,
 }) {
   const [titleDraft, setTitleDraft] = useState(task.title)
   const [descriptionDraft, setDescriptionDraft] = useState(task.description ?? '')
@@ -1708,37 +1471,66 @@ function TaskLightPanel({
   const submitComment = () => {
     const text = commentText.trim()
     if (!text) return
-    const next = [
-      ...comments,
-      {
-        id: `c-${Date.now()}`,
-        author: currentUser.name,
-        authorId: currentUser.id,
-        time: nowTimeLabel(),
-        text,
-      },
-    ]
-    onUpdateTask(task.id, { comments: next })
-    setCommentText('')
+    if (!supabase) {
+      setAttachmentError('Комментарии недоступны без подключения к серверу')
+      return
+    }
+    void (async () => {
+      try {
+        await insertCommentRemote(supabase, {
+          id: crypto.randomUUID(),
+          taskId: task.id,
+          authorId: currentUser.id,
+          body: text,
+        })
+        await refresh()
+        setCommentText('')
+        setAttachmentError(null)
+      } catch (e) {
+        console.error(e)
+        setAttachmentError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const removeComment = (commentId) => {
-    onUpdateTask(task.id, { comments: comments.filter((c) => c.id !== commentId) })
+    if (!supabase) return
+    void (async () => {
+      try {
+        await deleteCommentRemote(supabase, commentId)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setAttachmentError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const attachments = task.attachments ?? []
 
-  const removeAttachment = (attachmentId) => {
+  const removeAttachment = async (attachmentId) => {
     const att = attachments.find((a) => a.id === attachmentId)
-    if (att?.fileUrl?.startsWith('blob:')) URL.revokeObjectURL(att.fileUrl)
-    onUpdateTask(task.id, { attachments: attachments.filter((a) => a.id !== attachmentId) })
+    if (!att) return
+    const isBlob = att.fileUrl?.startsWith('blob:')
+    if (supabase && !isBlob) {
+      try {
+        await deleteTaskAttachmentRemote(supabase, att)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setAttachmentError('Не удалось удалить файл')
+        return
+      }
+      return
+    }
+    if (isBlob) URL.revokeObjectURL(att.fileUrl)
+    void refresh()
   }
 
   const addFilesFromList = async (fileList) => {
     const files = [...fileList].filter((f) => f && f.size > 0)
     if (files.length === 0) return
-    let list = [...attachments]
-    let total = sumAttachmentBytes(list)
+    let total = sumAttachmentBytes(attachments)
     for (const file of files) {
       const v = validateTaskAttachment(file, total)
       if (!v.ok) {
@@ -1751,21 +1543,16 @@ function TaskLightPanel({
         await readFileForProgress(file, (p) => {
           setUploading((u) => u.map((x) => (x.id === uploadId ? { ...x, progress: p } : x)))
         })
-        const fileUrl = URL.createObjectURL(file)
-        const newAtt = {
-          id: `a-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          taskId: task.id,
-          fileName: file.name,
-          size: file.size,
-          mimeType: file.type || 'application/octet-stream',
-          fileUrl,
-          uploadedBy: currentUser.id,
+        if (!supabase || !projectId) {
+          setAttachmentError('Загрузка файлов недоступна')
+          continue
         }
-        list = [...list, newAtt]
+        await uploadTaskAttachment(supabase, task.id, projectId, file, currentUser.id)
         total += file.size
-        onUpdateTask(task.id, { attachments: list })
+        await refresh()
         setAttachmentError(null)
-      } catch {
+      } catch (e) {
+        console.error(e)
         setAttachmentError('Ошибка загрузки')
       } finally {
         setUploading((u) => u.filter((x) => x.id !== uploadId))
@@ -1884,13 +1671,15 @@ function TaskLightPanel({
             <span className="task-panel__pill task-panel__pill--assignee">
               👤
               <select
-                value={task.assignee}
-                onChange={(e) => onUpdateTask(task.id, { assignee: e.target.value })}
+                value={assigneeSelectValue(task, assigneeUsers)}
+                onChange={(e) =>
+                  onUpdateTask(task.id, { assigneeUserId: e.target.value || null })
+                }
               >
                 <option value="">Не назначен</option>
-                {assigneeOptions.map((person) => (
-                  <option key={person} value={person}>
-                    {person}
+                {assigneeUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}
                   </option>
                 ))}
               </select>
@@ -2101,70 +1890,51 @@ function TaskLightPanel({
 }
 
 function App() {
-  const sessionInit = useMemo(() => initAppSession(), [])
-  const [users, setUsers] = useState(sessionInit.users)
-  const [currentUserId, setCurrentUserId] = useState(sessionInit.currentUserId)
-  const [lastUserId, setLastUserId] = useState(sessionInit.lastUserId)
-  const [addUserOpen, setAddUserOpen] = useState(false)
-  const [addUserError, setAddUserError] = useState(null)
+  const {
+    supabase,
+    session,
+    profile,
+    profileError,
+    profileLoading,
+    loading: authLoading,
+    signIn,
+    signOut,
+    configured,
+    refreshProfile,
+  } = useAuth()
+  const currentUserId = session?.user?.id ?? null
 
-  const currentUser = useMemo(
-    () => (currentUserId ? users.find((u) => u.id === currentUserId) ?? null : null),
-    [users, currentUserId],
-  )
-
-  useEffect(() => {
-    if (!currentUserId) return
-    try {
-      localStorage.setItem(LS_CURRENT_USER_KEY, currentUserId)
-      localStorage.setItem(LS_LAST_USER_KEY, currentUserId)
-      setLastUserId(currentUserId)
-    } catch {
-      /* ignore */
-    }
-  }, [currentUserId])
-
-  const submitNewUser = useCallback((nameRaw, color) => {
-    const name = (nameRaw || '').trim()
-    if (!name) {
-      setAddUserError('Введите имя')
-      return false
-    }
-    const id = `u-${Date.now()}`
-    const newUser = {
+  const currentUser = useMemo(() => {
+    if (!session?.user?.id || !profile) return null
+    const id = session.user.id
+    const hash = [...id].reduce((a, c) => a + c.charCodeAt(0), 0)
+    const displayName = (profile.name || '').trim() || 'Пользователь'
+    return {
       id,
-      name,
-      avatarColor: color || USER_AVATAR_COLORS[users.length % USER_AVATAR_COLORS.length],
+      name: displayName,
+      avatarUrl: profile.avatar_url || undefined,
+      avatarColor: USER_AVATAR_COLORS[Math.abs(hash) % USER_AVATAR_COLORS.length],
     }
-    setUsers((prev) => {
-      const next = [...prev, newUser]
-      saveUsersToStorage(next)
-      return next
-    })
-    setAddUserError(null)
-    if (!currentUserId) {
-      setCurrentUserId(id)
-    }
-    return true
-  }, [users.length, currentUserId])
+  }, [session, profile])
 
-  const switchUser = useCallback((id) => {
-    if (!users.some((u) => u.id === id)) return
-    setCurrentUserId(id)
-  }, [users])
-
-  const openChangeUser = useCallback(() => {
-    try {
-      localStorage.removeItem(LS_CURRENT_USER_KEY)
-    } catch {
-      /* ignore */
-    }
-    setCurrentUserId(null)
-  }, [])
-
-  const [mineFilterActive, setMineFilterActive] = useState(() =>
-    currentUserId ? readMineFilterForUser(currentUserId) : false,
+  const dataEnabled = Boolean(configured && currentUserId && profile && !profileError)
+  const { projects, users, loading: dataLoading, refresh } = useTrackerData(
+    supabase,
+    currentUserId,
+    dataEnabled,
   )
+
+  const saveUserDisplayName = useCallback(
+    async (name) => {
+      if (!supabase || !currentUserId) throw new Error('Нет подключения')
+      await updateProfileNameRemote(supabase, currentUserId, name)
+      await refreshProfile()
+      await refresh()
+    },
+    [supabase, currentUserId, refreshProfile, refresh],
+  )
+
+  const [mineFilterActive, setMineFilterActive] = useState(false)
 
   useEffect(() => {
     if (!currentUserId) {
@@ -2186,26 +1956,17 @@ function App() {
   /** Глобально: автосдвиг зависимых по FS при изменении дедлайна (гант + формы). */
   const [autoShiftDependents, setAutoShiftDependents] = useState(true)
 
-  const [projects, setProjects] = useState(seedProjects)
-  const [assigneeOptionsState, setAssigneeOptionsState] = useState(assigneeOptions)
-  const [selectedProjectId, setSelectedProjectId] = useState(seedProjects[0].id)
+  const [selectedProjectId, setSelectedProjectId] = useState('')
   const [selectedTaskIds, setSelectedTaskIds] = useState([])
   /** `${projectId}:${milestoneId}` → развёрнут блок завершённых */
   const [expandedCompletedSections, setExpandedCompletedSections] = useState({})
   const [editingCompletedTaskId, setEditingCompletedTaskId] = useState(null)
   const [editingCompletedDraft, setEditingCompletedDraft] = useState({
     title: '',
-    assignee: '',
+    assigneeUserId: '',
     deadline: todayLocalDate(),
   })
-  const [expandedMilestonesByProject, setExpandedMilestonesByProject] = useState(() =>
-    Object.fromEntries(
-      seedProjects.map((project) => [
-        project.id,
-        [ungroupedMilestoneId, ...project.milestones.map((m) => m.id)],
-      ]),
-    ),
-  )
+  const [expandedMilestonesByProject, setExpandedMilestonesByProject] = useState({})
   const [milestonePlan, setMilestonePlan] = useState({})
   const [violatingTaskIds, setViolatingTaskIds] = useState([])
   const [dependencyError, setDependencyError] = useState(null)
@@ -2216,6 +1977,8 @@ function App() {
   const moveTaskToMilestoneLockRef = useRef(false)
   const [showNewProjectModal, setShowNewProjectModal] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [showRenameProjectModal, setShowRenameProjectModal] = useState(false)
+  const [renameProjectDraft, setRenameProjectDraft] = useState('')
   const [openedTaskId, setOpenedTaskId] = useState(null)
   const [editingMilestoneTitleId, setEditingMilestoneTitleId] = useState(null)
   const [editingMilestoneTitleDraft, setEditingMilestoneTitleDraft] = useState('')
@@ -2226,20 +1989,37 @@ function App() {
   const addMilestoneAnchorRef = useRef(null)
   const newMilestoneFieldId = useId()
 
+  const resolvedSelectedProjectId = useMemo(() => {
+    if (!projects.length) return ''
+    if (selectedProjectId && projects.some((p) => p.id === selectedProjectId)) return selectedProjectId
+    return projects[0].id
+  }, [projects, selectedProjectId])
+
   const selectedProject = useMemo(
-    () => projects.find((project) => project.id === selectedProjectId) ?? null,
-    [projects, selectedProjectId],
+    () =>
+      resolvedSelectedProjectId
+        ? projects.find((project) => project.id === resolvedSelectedProjectId) ?? null
+        : null,
+    [projects, resolvedSelectedProjectId, projects],
   )
   const openedTask = useMemo(
     () => selectedProject?.tasks.find((t) => t.id === openedTaskId) ?? null,
     [selectedProject, openedTaskId],
   )
 
+  /** Все вехи + «Без вехи» — состояние по умолчанию (развернуто). */
+  const allExpandedMilestoneIds = useMemo(() => {
+    if (!selectedProject) return [ungroupedMilestoneId]
+    return [ungroupedMilestoneId, ...selectedProject.milestones.map((m) => m.id)]
+  }, [selectedProject])
+
+  const expandedMilestoneIdsResolved =
+    expandedMilestonesByProject[resolvedSelectedProjectId] ?? allExpandedMilestoneIds
+
   useEffect(() => {
     if (projects.length === 0) return
-    if (!projects.some((p) => p.id === selectedProjectId)) {
-      setSelectedProjectId(projects[0].id)
-    }
+    const valid = Boolean(selectedProjectId && projects.some((p) => p.id === selectedProjectId))
+    if (!valid) setSelectedProjectId(projects[0].id)
   }, [projects, selectedProjectId])
 
   useEffect(() => {
@@ -2292,21 +2072,41 @@ function App() {
     }
   }, [projects])
 
-  const createProject = () => {
+  const createProject = async () => {
     const name = newProjectName.trim()
-    if (!name) return
-    const id = `p-${Date.now()}`
-    setProjects((prev) => [...prev, { id, name, milestones: [], tasks: [] }])
-    setExpandedMilestonesByProject((prev) => ({
-      ...prev,
-      [id]: [ungroupedMilestoneId],
-    }))
-    setSelectedProjectId(id)
-    setNewProjectName('')
-    setShowNewProjectModal(false)
-    setSelectedTaskIds([])
-    setViolatingTaskIds([])
-    setDependencyError(null)
+    if (!name || !supabase || !currentUserId) return
+    try {
+      const id = await createProjectRemote(supabase, name, currentUserId)
+      await refresh()
+      setExpandedMilestonesByProject((prev) => ({
+        ...prev,
+        [id]: [ungroupedMilestoneId],
+      }))
+      setSelectedProjectId(id)
+      setNewProjectName('')
+      setShowNewProjectModal(false)
+      setSelectedTaskIds([])
+      setViolatingTaskIds([])
+      setDependencyError(null)
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось создать проект: ${formatSupabaseError(e)}`)
+    }
+  }
+
+  const renameProject = async () => {
+    const name = renameProjectDraft.trim()
+    if (!name || !supabase || !resolvedSelectedProjectId) return
+    try {
+      await updateProjectTitleRemote(supabase, resolvedSelectedProjectId, name)
+      await refresh()
+      setShowRenameProjectModal(false)
+      setRenameProjectDraft('')
+      setDependencyError(null)
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось переименовать проект: ${formatSupabaseError(e)}`)
+    }
   }
 
   const groupedMilestones = useMemo(() => {
@@ -2357,55 +2157,80 @@ function App() {
     return maxDate(visibleTasks.map((task) => task.deadline))
   }, [selectedProject, visibleTasks])
 
-  const milestoneDeadline = (milestoneId) => {
+  /** Макс. дедлайн по активным задачам вехи — для сдвига задач и сравнения с целью. */
+  const taskDerivedMilestoneDeadline = (milestoneId) => {
     const active = (tasksByMilestone[milestoneId] ?? []).filter((t) => t.status !== 'Готово')
     return maxDate(active.map((task) => task.deadline))
   }
 
+  /** Для UI и диаграммы: дедлайн вехи из БД или по задачам. */
+  const milestoneDeadline = (milestoneId) => {
+    if (milestoneId === ungroupedMilestoneId) return taskDerivedMilestoneDeadline(milestoneId)
+    const m = selectedProject?.milestones.find((x) => x.id === milestoneId)
+    if (m?.deadline) return m.deadline
+    return taskDerivedMilestoneDeadline(milestoneId)
+  }
+
   const updateTask = (taskId, patch) => {
+    const { comments: _pc, attachments: _pa, ...patchRest } = patch
     let patchWithActor =
-      currentUserId != null ? { ...patch, updatedBy: currentUserId } : patch
+      currentUserId != null ? { ...patchRest, updatedBy: currentUserId } : patchRest
+    if (patch.assigneeUserId !== undefined) {
+      const id = patch.assigneeUserId
+      const u = id ? users.find((x) => x.id === id) : null
+      patchWithActor = { ...patchWithActor, assignee: u?.name ?? '', assigneeId: u?.id ?? null }
+    }
     if (patch.assignee !== undefined) {
       const n = (patch.assignee || '').trim()
-      const u = n ? users.find((x) => x.name === n) : null
-      patchWithActor = { ...patchWithActor, assigneeId: u ? u.id : undefined }
+      const u = n ? findUserByName(users, n) : null
+      patchWithActor = { ...patchWithActor, assignee: n, assigneeId: u ? u.id : null }
     }
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        const oldTask = project.tasks.find((t) => t.id === taskId)
-        if (!oldTask) return project
 
-        if (patchWithActor.dependsOnTaskId !== undefined) {
-          if (
-            patchWithActor.dependsOnTaskId &&
-            wouldDependencyCreateCycle(project.tasks, taskId, patchWithActor.dependsOnTaskId)
-          ) {
-            setDependencyError(DEPENDENCY_CYCLE_MESSAGE)
-            return project
-          }
-          setDependencyError(null)
+    void (async () => {
+      const project = projects.find((p) => p.id === resolvedSelectedProjectId)
+      if (!project || !supabase || !currentUserId || !dataEnabled) {
+        if (!supabase || !currentUserId || !dataEnabled) {
+          setDependencyError('Сохранение недоступно: нет подключения или авторизации')
         }
+        return
+      }
+      const oldTask = project.tasks.find((t) => t.id === taskId)
+      if (!oldTask) return
 
-        let merged = { ...oldTask, ...patchWithActor }
-        let tasks = project.tasks.map((t) => (t.id === taskId ? merged : t))
-
-        if (patchWithActor.dependsOnTaskId !== undefined && merged.dependsOnTaskId) {
-          const parent = tasks.find((t) => t.id === merged.dependsOnTaskId)
-          if (parent) {
-            merged = rescheduleChildFromParent(parent, merged)
-            tasks = tasks.map((t) => (t.id === taskId ? merged : t))
-          }
+      if (patchWithActor.dependsOnTaskId !== undefined) {
+        if (
+          patchWithActor.dependsOnTaskId &&
+          wouldDependencyCreateCycle(project.tasks, taskId, patchWithActor.dependsOnTaskId)
+        ) {
+          setDependencyError(DEPENDENCY_CYCLE_MESSAGE)
+          return
         }
+        setDependencyError(null)
+      }
 
-        /* Пересчёт зависимых только если реально изменился дедлайн родителя (не привязываемся к patch.deadline). */
-        if (merged.deadline !== oldTask.deadline && autoShiftDependents) {
-          tasks = cascadeFsShiftFromParent(tasks, merged)
+      let merged = { ...oldTask, ...patchWithActor }
+      let tasks = project.tasks.map((t) => (t.id === taskId ? merged : t))
+
+      if (patchWithActor.dependsOnTaskId !== undefined && merged.dependsOnTaskId) {
+        const parent = tasks.find((t) => t.id === merged.dependsOnTaskId)
+        if (parent) {
+          merged = rescheduleChildFromParent(parent, merged)
+          tasks = tasks.map((t) => (t.id === taskId ? merged : t))
         }
+      }
 
-        return { ...project, tasks }
-      }),
-    )
+      if (merged.deadline !== oldTask.deadline && autoShiftDependents) {
+        tasks = cascadeFsShiftFromParent(tasks, merged)
+      }
+
+      try {
+        await persistProjectTasksDelta(supabase, project.id, currentUserId, project.tasks, tasks)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const applyGanttTaskDates = useCallback(
@@ -2423,11 +2248,24 @@ function App() {
         return
       }
       setDependencyError(null)
-      setProjects((prev) =>
-        prev.map((p) => (p.id === selectedProjectId ? { ...p, tasks: result.tasks } : p)),
-      )
+      if (!supabase || !currentUserId || !dataEnabled) return
+      void (async () => {
+        try {
+          await persistProjectTasksDelta(
+            supabase,
+            selectedProject.id,
+            currentUserId,
+            selectedProject.tasks,
+            result.tasks,
+          )
+          await refresh()
+        } catch (e) {
+          console.error(e)
+          setDependencyError(formatSupabaseError(e))
+        }
+      })()
     },
-    [selectedProject, selectedProjectId, autoShiftDependents],
+    [selectedProject, resolvedSelectedProjectId, autoShiftDependents, supabase, currentUserId, dataEnabled, refresh],
   )
 
   const toggleTaskSelection = (taskId) => {
@@ -2451,39 +2289,34 @@ function App() {
         return
       }
       const newMilestoneId = targetMilestoneKey === ungroupedMilestoneId ? null : targetMilestoneKey
+      if (!supabase || !currentUserId || !dataEnabled) {
+        setTaskMoveNotice({ variant: 'error', text: 'Сохранение недоступно' })
+        return
+      }
       moveTaskToMilestoneLockRef.current = true
       try {
-        await new Promise((r) => setTimeout(r, 0))
-        setProjects((prev) =>
-          prev.map((p) => {
-            if (p.id !== selectedProjectId) return p
-            return {
-              ...p,
-              tasks: p.tasks.map((t) =>
-                t.id === taskId ? { ...t, milestoneId: newMilestoneId } : t,
-              ),
-            }
-          }),
-        )
+        await updateTaskMilestoneRemote(supabase, taskId, currentUserId, newMilestoneId)
+        await refresh()
         setSelectedTaskIds((prev) => prev.filter((id) => id !== taskId))
         setDependencyError(null)
         setExpandedMilestonesByProject((prev) => ({
           ...prev,
-          [selectedProjectId]: [
-            ...new Set([...(prev[selectedProjectId] ?? []), targetMilestoneKey]),
+          [resolvedSelectedProjectId]: [
+            ...new Set([...(prev[resolvedSelectedProjectId] ?? allExpandedMilestoneIds), targetMilestoneKey]),
           ],
         }))
         setTaskMoveNotice({ variant: 'success', text: 'Задача перемещена' })
-      } catch {
+      } catch (e) {
+        console.error(e)
         setTaskMoveNotice({
           variant: 'error',
-          text: 'Ошибка соединения. Задача возвращена в исходную веху',
+          text: formatSupabaseError(e) || 'Не удалось сохранить перемещение',
         })
       } finally {
         moveTaskToMilestoneLockRef.current = false
       }
     },
-    [selectedProject, selectedProjectId],
+    [selectedProject, resolvedSelectedProjectId, supabase, currentUserId, dataEnabled, refresh, allExpandedMilestoneIds],
   )
 
   useEffect(() => {
@@ -2516,7 +2349,7 @@ function App() {
       }
       return next.length === prev.length ? prev : next
     })
-  }, [selectedProject, selectedProject.tasks, mineFilterActive, currentUserId, visibleTasks])
+  }, [selectedProject, selectedProject?.tasks, mineFilterActive, currentUserId, visibleTasks])
 
   const visibleViolatingTaskIds = useMemo(
     () => violatingTaskIds.filter((id) => visibleTasks.some((t) => t.id === id)),
@@ -2530,135 +2363,114 @@ function App() {
   }, [mineFilterActive, openedTaskId, selectedProject, visibleTasks, currentUserId])
 
   const bulkCompleteSelected = () => {
-    if (!selectedProject) return
-    const ids = new Set(
-      selectedTaskIds.filter((id) => {
-        const t = selectedProject.tasks.find((x) => x.id === id)
-        return t && t.status !== 'Готово'
-      }),
-    )
-    if (ids.size === 0) return
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((t) =>
-            ids.has(t.id)
-              ? { ...t, status: 'Готово', updatedBy: currentUserId ?? t.updatedBy }
-              : t,
-          ),
-        }
-      }),
-    )
-    setSelectedTaskIds((prev) => prev.filter((id) => !ids.has(id)))
+    if (!selectedProject || !supabase || !currentUserId || !dataEnabled) return
+    const ids = selectedTaskIds.filter((id) => {
+      const t = selectedProject.tasks.find((x) => x.id === id)
+      return t && t.status !== 'Готово'
+    })
+    if (ids.length === 0) return
+    void (async () => {
+      try {
+        await updateTasksStatusBulkRemote(supabase, currentUserId, ids, 'Готово')
+        await refresh()
+        setSelectedTaskIds((prev) => prev.filter((id) => !ids.includes(id)))
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const bulkDeleteSelected = () => {
-    if (!selectedProject) return
-    const ids = new Set(
-      selectedTaskIds.filter((id) => {
-        const t = selectedProject.tasks.find((x) => x.id === id)
-        return t && t.status !== 'Готово'
-      }),
-    )
-    if (ids.size === 0) return
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        for (const t of project.tasks) {
-          if (ids.has(t.id)) revokeTaskAttachmentUrls(t)
+    if (!selectedProject || !supabase || !dataEnabled) return
+    const ids = selectedTaskIds.filter((id) => {
+      const t = selectedProject.tasks.find((x) => x.id === id)
+      return t && t.status !== 'Готово'
+    })
+    if (ids.length === 0) return
+    void (async () => {
+      try {
+        for (const id of ids) {
+          const t = selectedProject.tasks.find((x) => x.id === id)
+          if (t) revokeTaskAttachmentUrls(t)
         }
-        const remaining = project.tasks.filter((t) => !ids.has(t.id))
-        const cleaned = remaining.map((t) => ({
-          ...t,
-          dependsOnTaskId:
-            t.dependsOnTaskId && ids.has(t.dependsOnTaskId) ? null : t.dependsOnTaskId,
-        }))
-        return { ...project, tasks: cleaned }
-      }),
-    )
-    setSelectedTaskIds([])
+        await deleteTasksBulkRemote(supabase, ids)
+        await refresh()
+        setSelectedTaskIds([])
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const deleteTaskById = (taskId) => {
     if (!window.confirm('Удалить задачу?')) return
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        const taskToKill = project.tasks.find((t) => t.id === taskId)
-        if (taskToKill) revokeTaskAttachmentUrls(taskToKill)
-        const remaining = project.tasks.filter((t) => t.id !== taskId)
-        const cleaned = remaining.map((t) => ({
-          ...t,
-          dependsOnTaskId: t.dependsOnTaskId === taskId ? null : t.dependsOnTaskId,
-        }))
-        return { ...project, tasks: cleaned }
-      }),
-    )
-    setSelectedTaskIds((prev) => prev.filter((id) => id !== taskId))
-    setOpenedTaskId(null)
-    if (editingCompletedTaskId === taskId) setEditingCompletedTaskId(null)
+    if (!supabase || !dataEnabled) {
+      setDependencyError('Сохранение недоступно')
+      return
+    }
+    void (async () => {
+      const project = projects.find((p) => p.id === resolvedSelectedProjectId)
+      const taskToKill = project?.tasks.find((t) => t.id === taskId)
+      if (taskToKill) revokeTaskAttachmentUrls(taskToKill)
+      try {
+        await deleteTaskRemote(supabase, taskId)
+        await refresh()
+        setSelectedTaskIds((prev) => prev.filter((id) => id !== taskId))
+        setOpenedTaskId(null)
+        if (editingCompletedTaskId === taskId) setEditingCompletedTaskId(null)
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const clearTaskSelection = () => setSelectedTaskIds([])
 
   const toggleCompletedSection = (milestoneId) => {
-    const key = `${selectedProjectId}:${milestoneId}`
+    const key = `${resolvedSelectedProjectId}:${milestoneId}`
     setExpandedCompletedSections((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
-  const addAssigneeOption = (name) => {
-    const normalized = name.trim()
-    if (!normalized) return null
-    const existing = assigneeOptionsState.find((x) => x.toLowerCase() === normalized.toLowerCase())
-    if (existing) return existing
-    setAssigneeOptionsState((prev) => [...prev, normalized])
-    return normalized
-  }
-
   const restoreCompletedTask = (taskId) => {
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((t) => (t.id === taskId ? { ...t, status: 'В работе' } : t)),
-        }
-      }),
-    )
-    if (editingCompletedTaskId === taskId) {
-      setEditingCompletedTaskId(null)
-    }
+    if (!supabase || !currentUserId || !dataEnabled) return
+    void (async () => {
+      try {
+        await updateTasksStatusBulkRemote(supabase, currentUserId, [taskId], 'В работе')
+        await refresh()
+        if (editingCompletedTaskId === taskId) setEditingCompletedTaskId(null)
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const deleteCompletedTask = (taskId) => {
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        const taskToKill = project.tasks.find((t) => t.id === taskId)
-        if (taskToKill) revokeTaskAttachmentUrls(taskToKill)
-        const remaining = project.tasks.filter((t) => t.id !== taskId)
-        const cleaned = remaining.map((t) => ({
-          ...t,
-          dependsOnTaskId: t.dependsOnTaskId === taskId ? null : t.dependsOnTaskId,
-        }))
-        return { ...project, tasks: cleaned }
-      }),
-    )
-    if (editingCompletedTaskId === taskId) {
-      setEditingCompletedTaskId(null)
-    }
-    if (openedTaskId === taskId) {
-      setOpenedTaskId(null)
-    }
+    if (!supabase || !dataEnabled) return
+    void (async () => {
+      const project = projects.find((p) => p.id === resolvedSelectedProjectId)
+      const taskToKill = project?.tasks.find((t) => t.id === taskId)
+      if (taskToKill) revokeTaskAttachmentUrls(taskToKill)
+      try {
+        await deleteTaskRemote(supabase, taskId)
+        await refresh()
+        if (editingCompletedTaskId === taskId) setEditingCompletedTaskId(null)
+        if (openedTaskId === taskId) setOpenedTaskId(null)
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const beginEditCompletedTask = (task) => {
     setEditingCompletedTaskId(task.id)
     setEditingCompletedDraft({
       title: task.title,
-      assignee: task.assignee || '',
+      assigneeUserId: assigneeSelectValue(task, users),
       deadline: task.deadline,
     })
   }
@@ -2666,28 +2478,32 @@ function App() {
   const saveEditCompletedTask = (taskId) => {
     const title = editingCompletedDraft.title.trim()
     if (!title) return
-    const assigneeName = editingCompletedDraft.assignee.trim()
-    const assigneeUser = assigneeName ? users.find((x) => x.name === assigneeName) : null
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        return {
-          ...project,
-          tasks: project.tasks.map((t) =>
-            t.id === taskId
-              ? {
-                  ...t,
-                  title,
-                  assignee: assigneeName,
-                  assigneeId: assigneeUser ? assigneeUser.id : undefined,
-                  deadline: editingCompletedDraft.deadline,
-                }
-              : t,
-          ),
-        }
-      }),
+    const uid = editingCompletedDraft.assigneeUserId
+    const assigneeUser = uid ? users.find((u) => u.id === uid) : null
+    const project = projects.find((p) => p.id === resolvedSelectedProjectId)
+    if (!project || !supabase || !currentUserId || !dataEnabled) return
+    const newTasks = project.tasks.map((t) =>
+      t.id === taskId
+        ? {
+            ...t,
+            title,
+            assignee: assigneeUser?.name ?? '',
+            assigneeId: assigneeUser?.id,
+            deadline: editingCompletedDraft.deadline,
+            updatedBy: currentUserId,
+          }
+        : t,
     )
-    setEditingCompletedTaskId(null)
+    void (async () => {
+      try {
+        await persistProjectTasksDelta(supabase, project.id, currentUserId, project.tasks, newTasks)
+        await refresh()
+        setEditingCompletedTaskId(null)
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const cancelEditCompletedTask = () => {
@@ -2696,97 +2512,110 @@ function App() {
 
   const toggleMilestoneExpanded = (milestoneId) => {
     setExpandedMilestonesByProject((prev) => {
-      const current = new Set(prev[selectedProjectId] ?? [])
+      const current = new Set(prev[resolvedSelectedProjectId] ?? allExpandedMilestoneIds)
       if (current.has(milestoneId)) current.delete(milestoneId)
       else current.add(milestoneId)
-      return { ...prev, [selectedProjectId]: [...current] }
+      return { ...prev, [resolvedSelectedProjectId]: [...current] }
     })
   }
 
   const shiftTasksByIds = (ids, days) => {
     if (!ids.length) return
     const idSet = new Set(ids)
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
-        let tasks = project.tasks.map((task) =>
-          idSet.has(task.id)
-            ? {
-                ...task,
-                startDate: shiftDate(task.startDate, days),
-                deadline: shiftDate(task.deadline, days),
-              }
-            : task,
-        )
-        if (autoShiftDependents) {
-          for (const id of ids) {
-            const parent = tasks.find((t) => t.id === id)
-            if (parent) tasks = cascadeFsShiftFromParent(tasks, parent)
+    const project = projects.find((p) => p.id === resolvedSelectedProjectId)
+    if (!project || !supabase || !currentUserId || !dataEnabled) return
+    let tasks = project.tasks.map((task) =>
+      idSet.has(task.id)
+        ? {
+            ...task,
+            startDate: shiftDate(task.startDate, days),
+            deadline: shiftDate(task.deadline, days),
           }
-        }
-        return { ...project, tasks }
-      }),
+        : task,
     )
+    if (autoShiftDependents) {
+      for (const id of ids) {
+        const parent = tasks.find((t) => t.id === id)
+        if (parent) tasks = cascadeFsShiftFromParent(tasks, parent)
+      }
+    }
+    void (async () => {
+      try {
+        await persistProjectTasksDelta(supabase, project.id, currentUserId, project.tasks, tasks)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
-  const createTaskInMilestone = (milestoneId, { title, assignee, deadline, dependsOnTaskId, comment }) => {
+  const createTaskInMilestone = (milestoneId, { title, assigneeUserId, deadline, dependsOnTaskId, comment }) => {
     if (!title.trim() || !selectedProject) return
-    const id = `t-${Date.now()}`
+    if (!supabase || !currentUserId || !dataEnabled) {
+      setDependencyError('Сохранение недоступно')
+      return
+    }
+    const id = crypto.randomUUID()
     const milestoneIdResolved = milestoneId === ungroupedMilestoneId ? null : milestoneId
 
-    const assigneeTrim = (assignee || '').trim()
-    const assigneeUser = assigneeTrim ? users.find((x) => x.name === assigneeTrim) : null
+    const assigneeUser = assigneeUserId ? users.find((u) => u.id === assigneeUserId) : null
     const baseTask = {
       id,
       title: title.trim(),
+      description: (comment || '').trim(),
       status: 'В работе',
-      assignee: assigneeTrim,
-      assigneeId: assigneeUser ? assigneeUser.id : undefined,
+      assignee: assigneeUser?.name ?? '',
+      assigneeId: assigneeUser?.id,
       startDate: todayLocalDate(),
       deadline: deadline || todayLocalDate(),
       milestoneId: milestoneIdResolved,
       priority: 'medium',
       dependsOnTaskId: dependsOnTaskId || null,
-      comment: (comment || '').trim(),
+      comment: '',
       attachments: [],
+      comments: [],
       createdBy: currentUserId ?? undefined,
       updatedBy: currentUserId ?? undefined,
     }
 
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== selectedProjectId) return project
+    if (baseTask.dependsOnTaskId) {
+      if (wouldDependencyCreateCycle(selectedProject.tasks, id, baseTask.dependsOnTaskId)) {
+        setDependencyError(DEPENDENCY_CYCLE_MESSAGE)
+        return
+      }
+      setDependencyError(null)
+    } else {
+      setDependencyError(null)
+    }
 
-        if (baseTask.dependsOnTaskId) {
-          if (wouldDependencyCreateCycle(project.tasks, id, baseTask.dependsOnTaskId)) {
-            setDependencyError(DEPENDENCY_CYCLE_MESSAGE)
-            return project
-          }
-          setDependencyError(null)
-        } else {
-          setDependencyError(null)
-        }
+    let merged = { ...baseTask }
+    let tasks = [...selectedProject.tasks]
 
-        let merged = { ...baseTask }
-        let tasks = [...project.tasks]
+    if (merged.dependsOnTaskId) {
+      const parent = tasks.find((t) => t.id === merged.dependsOnTaskId)
+      if (parent) {
+        merged = rescheduleChildFromParent(parent, merged)
+      }
+    }
 
-        if (merged.dependsOnTaskId) {
-          const parent = tasks.find((t) => t.id === merged.dependsOnTaskId)
-          if (parent) {
-            merged = rescheduleChildFromParent(parent, merged)
-          }
-        }
+    tasks = [...tasks, merged]
 
-        tasks = [...tasks, merged]
-        return { ...project, tasks }
-      }),
-    )
+    void (async () => {
+      try {
+        await persistProjectTasksDelta(supabase, selectedProject.id, currentUserId, selectedProject.tasks, tasks)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const applyMilestoneDeadlinePlan = (milestoneId, targetParam) => {
     const plan = milestonePlan[milestoneId]
     const target = targetParam ?? plan?.target
-    const current = milestoneDeadline(milestoneId)
+    const current = taskDerivedMilestoneDeadline(milestoneId)
     if (!target || !current) return
     const tasks = (tasksByMilestone[milestoneId] ?? []).filter((t) => t.status !== 'Готово')
     if (!tasks.length) return
@@ -2807,82 +2636,80 @@ function App() {
     }
   }
 
-  const createMilestone = (rawName) => {
+  const createMilestone = async (rawName) => {
     const name = rawName.trim()
-    if (!name) return
-    const id = `m-${Date.now()}`
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== selectedProjectId) return p
-        return { ...p, milestones: [...p.milestones, { id, name }] }
-      }),
-    )
-    setExpandedMilestonesByProject((prev) => ({
-      ...prev,
-      [selectedProjectId]: [...(prev[selectedProjectId] ?? []), id],
-    }))
-    setAddingMilestoneOpen(false)
-    setNewMilestoneNameDraft('')
+    if (!name || !supabase || !currentUserId || !resolvedSelectedProjectId) return
+    try {
+      const id = await createMilestoneRemote(supabase, resolvedSelectedProjectId, name, currentUserId)
+      await refresh()
+      setExpandedMilestonesByProject((prev) => ({
+        ...prev,
+        [resolvedSelectedProjectId]: [...new Set([...(prev[resolvedSelectedProjectId] ?? allExpandedMilestoneIds), id])],
+      }))
+      setAddingMilestoneOpen(false)
+      setNewMilestoneNameDraft('')
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось создать веху: ${formatSupabaseError(e)}`)
+    }
   }
 
   const renameMilestone = (milestoneId, name) => {
     const trimmed = name.trim()
     if (!trimmed || milestoneId === ungroupedMilestoneId) return
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== selectedProjectId) return p
-        return {
-          ...p,
-          milestones: p.milestones.map((m) => (m.id === milestoneId ? { ...m, name: trimmed } : m)),
-        }
-      }),
-    )
+    if (!supabase || !dataEnabled) return
+    void (async () => {
+      try {
+        await updateMilestoneTitleRemote(supabase, milestoneId, trimmed)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const deleteMilestone = (milestoneId) => {
     if (milestoneId === ungroupedMilestoneId) return
     if (!window.confirm('Удалить веху? Задачи перейдут в «Без вехи».')) return
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== selectedProjectId) return p
-        return {
-          ...p,
-          milestones: p.milestones.filter((m) => m.id !== milestoneId),
-          tasks: p.tasks.map((t) =>
-            t.milestoneId === milestoneId ? { ...t, milestoneId: null } : t,
-          ),
-        }
-      }),
-    )
-    setMilestonePlan((prev) => {
-      const next = { ...prev }
-      delete next[milestoneId]
-      return next
-    })
-    setExpandedMilestonesByProject((prev) => ({
-      ...prev,
-      [selectedProjectId]: (prev[selectedProjectId] ?? []).filter((id) => id !== milestoneId),
-    }))
-    setMilestoneMenuOpenId(null)
+    if (!supabase || !dataEnabled) return
+    void (async () => {
+      try {
+        await deleteMilestoneRemote(supabase, milestoneId)
+        await refresh()
+        setMilestonePlan((prev) => {
+          const next = { ...prev }
+          delete next[milestoneId]
+          return next
+        })
+        setExpandedMilestonesByProject((prev) => ({
+          ...prev,
+          [resolvedSelectedProjectId]: (prev[resolvedSelectedProjectId] ?? []).filter((id) => id !== milestoneId),
+        }))
+        setMilestoneMenuOpenId(null)
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const completeMilestoneTasks = (milestoneId) => {
     const tasks = tasksByMilestone[milestoneId] ?? []
     const active = tasks.filter((t) => t.status !== 'Готово')
     if (active.length === 0) return
-    const ids = new Set(active.map((t) => t.id))
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== selectedProjectId) return p
-        return {
-          ...p,
-          tasks: p.tasks.map((t) =>
-            ids.has(t.id) ? { ...t, status: 'Готово', updatedBy: currentUserId ?? t.updatedBy } : t,
-          ),
-        }
-      }),
-    )
-    setMilestoneMenuOpenId(null)
+    const ids = active.map((t) => t.id)
+    if (!supabase || !currentUserId || !dataEnabled) return
+    void (async () => {
+      try {
+        await updateTasksStatusBulkRemote(supabase, currentUserId, ids, 'Готово')
+        await refresh()
+        setMilestoneMenuOpenId(null)
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
   }
 
   const sortedTasks = useMemo(() => {
@@ -2906,7 +2733,7 @@ function App() {
   })
   const problematicTasks = sortedTasks.filter((task) => {
     if (task.status === 'Готово') return false
-    const noAssignee = !resolveTaskAssigneeId(task, users)
+    const noAssignee = !taskHasAssigneeDisplay(task)
     const overdue = toDate(task.deadline) < today
     const tooLongInProgress =
       task.status === 'В работе' && Math.round((today - toDate(task.startDate)) / dayMs) > 10
@@ -2921,29 +2748,79 @@ function App() {
     setOpenedTaskId(taskId)
   }
 
-  if (!currentUserId) {
+  if (!configured) {
     return (
-      <>
-        <UserPickerScreen
-          users={users}
-          lastUserId={lastUserId}
-          onSelectUser={setCurrentUserId}
-          onOpenAddUser={() => {
-            setAddUserError(null)
-            setAddUserOpen(true)
-          }}
-          onContinueAsLast={setCurrentUserId}
-        />
-        <AddUserModal
-          open={addUserOpen}
-          onClose={() => {
-            setAddUserOpen(false)
-            setAddUserError(null)
-          }}
-          onSubmit={submitNewUser}
-          error={addUserError}
-        />
-      </>
+      <div className="auth-screen">
+        <div className="auth-panel">
+          <h1 className="heading-h1 auth-panel__title">Нужен Supabase</h1>
+          <p className="auth-panel__lede">
+            В корне проекта нет переменных <code className="auth-inline-code">VITE_SUPABASE_*</code>. Без них клиент не
+            подключается к бэкенду.
+          </p>
+          <ol className="auth-steps">
+            <li>
+              Скопируйте <code className="auth-inline-code">.env.example</code> → <code className="auth-inline-code">.env</code>
+            </li>
+            <li>
+              Вставьте URL и anon key из Supabase: Settings → API
+            </li>
+            <li>
+              Остановите сервер и снова запустите <code className="auth-inline-code">npm run dev</code> (Vite читает .env
+              только при старте)
+            </li>
+          </ol>
+          <p className="auth-panel__hint muted">
+            Если открываете не dev-сервер, а старый <code className="auth-inline-code">dist</code> или другую папку —
+            изменений в коде не будет. Внизу справа должна быть метка «DEV · Vite».
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (authLoading) {
+    return (
+      <div className="auth-screen">
+        <p className="muted">Загрузка…</p>
+      </div>
+    )
+  }
+
+  if (!session) {
+    return <LoginScreen onSignIn={signIn} loading={authLoading} />
+  }
+
+  if (profileLoading) {
+    return (
+      <div className="auth-screen">
+        <p className="muted">Загрузка профиля…</p>
+      </div>
+    )
+  }
+
+  if (profileError === 'missing') {
+    return (
+      <ProfileMissingScreen
+        message="Профиль пользователя не найден. Обратитесь к администратору."
+        onSignOut={signOut}
+      />
+    )
+  }
+
+  if (profileError === 'fetch_failed') {
+    return (
+      <ProfileMissingScreen
+        message="Не удалось загрузить профиль. Проверьте соединение или обратитесь к администратору."
+        onSignOut={signOut}
+      />
+    )
+  }
+
+  if (dataLoading && projects.length === 0) {
+    return (
+      <div className="auth-screen">
+        <p className="muted">Загрузка проектов…</p>
+      </div>
     )
   }
 
@@ -2983,16 +2860,7 @@ function App() {
             </button>
           ) : null}
           {currentUser ? (
-            <CurrentUserMenu
-              currentUser={currentUser}
-              users={users}
-              onSwitchUser={switchUser}
-              onChangeUser={openChangeUser}
-              onOpenAddUser={() => {
-                setAddUserError(null)
-                setAddUserOpen(true)
-              }}
-            />
+            <CurrentUserMenu currentUser={currentUser} onSignOut={signOut} onSaveDisplayName={saveUserDisplayName} />
           ) : null}
         </div>
       </header>
@@ -3000,12 +2868,27 @@ function App() {
       <nav className="project-tabs" aria-label="Проекты">
         <div className="section-header project-tabs__header">
           <h2 className="heading-h2">Проекты</h2>
-          <button type="button" className="btn-primary" onClick={() => setShowNewProjectModal(true)}>
-            <span className="btn-primary__icon" aria-hidden>
-              +
-            </span>
-            Новый проект
-          </button>
+          <div className="project-tabs__actions">
+            {resolvedSelectedProjectId ? (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  const p = projects.find((x) => x.id === resolvedSelectedProjectId)
+                  setRenameProjectDraft(p?.name ?? '')
+                  setShowRenameProjectModal(true)
+                }}
+              >
+                Изменить
+              </button>
+            ) : null}
+            <button type="button" className="btn-primary" onClick={() => setShowNewProjectModal(true)}>
+              <span className="btn-primary__icon" aria-hidden>
+                +
+              </span>
+              Новый проект
+            </button>
+          </div>
         </div>
         <div className="project-tabs__list">
           {primaryTabs.map((project) => (
@@ -3013,8 +2896,8 @@ function App() {
               key={project.id}
               type="button"
               role="tab"
-              aria-selected={selectedProjectId === project.id}
-              className={`project-tab ${selectedProjectId === project.id ? 'project-tab--active' : ''}`}
+              aria-selected={resolvedSelectedProjectId === project.id}
+              className={`project-tab ${resolvedSelectedProjectId === project.id ? 'project-tab--active' : ''}`}
               onClick={() => switchProject(project.id)}
             >
               <span className="project-tab__label">{project.name}</span>
@@ -3069,7 +2952,7 @@ function App() {
       )}
 
       {selectedProject ? (
-        <div key={selectedProjectId} className="app-shell-content app-shell-content--fade">
+        <div key={resolvedSelectedProjectId} className="app-shell-content app-shell-content--fade">
       {mineFilterActive && visibleTasks.length === 0 ? (
         <div className="panel mine-filter-empty">
           <p className="mine-filter-empty__text">У вас нет задач по текущему фильтру</p>
@@ -3165,7 +3048,7 @@ function App() {
                 task.status === 'В работе' &&
                 Math.round((today - toDate(task.startDate)) / dayMs) > 10
               let subtitle = 'Требует внимания'
-              if (!resolveTaskAssigneeId(task, users)) subtitle = 'Нет исполнителя'
+              if (!taskHasAssigneeDisplay(task)) subtitle = 'Нет исполнителя'
               else if (overdue) subtitle = 'Просрочено'
               else if (longInProgress) subtitle = 'Долго в работе'
               else if (blockingSoon) subtitle = 'Блокирует (срок ≤ 7 дн.)'
@@ -3203,9 +3086,7 @@ function App() {
             const tasks = tasksByMilestone[milestone.id] ?? []
             const activeTasks = tasks.filter((t) => t.status !== 'Готово')
             const completedTasks = tasks.filter((t) => t.status === 'Готово')
-            const expanded = (expandedMilestonesByProject[selectedProjectId] ?? []).includes(
-              milestone.id,
-            )
+            const expanded = expandedMilestoneIdsResolved.includes(milestone.id)
             const deadline = milestoneDeadline(milestone.id)
             const overdueInMilestone = activeTasks.filter(
               (t) => getDeadlineLabel(t.deadline) === 'overdue',
@@ -3220,7 +3101,7 @@ function App() {
             })()
             const allSelected =
               activeTasks.length > 0 && activeTasks.every((t) => selectedTaskIds.includes(t.id))
-            const completedKey = `${selectedProjectId}:${milestone.id}`
+            const completedKey = `${resolvedSelectedProjectId}:${milestone.id}`
             const completedOpen = Boolean(expandedCompletedSections[completedKey])
             const isUngrouped = milestone.id === ungroupedMilestoneId
             const menuOpen = milestoneMenuOpenId === milestone.id
@@ -3411,6 +3292,21 @@ function App() {
                                     mode: prev[milestone.id]?.mode ?? 'shift',
                                   },
                                 }))
+                                if (!isUngrouped && supabase && dataEnabled) {
+                                  void (async () => {
+                                    try {
+                                      await updateMilestoneDeadlineRemote(
+                                        supabase,
+                                        milestone.id,
+                                        nextTarget || null,
+                                      )
+                                      await refresh()
+                                    } catch (e) {
+                                      console.error(e)
+                                      setDependencyError(formatSupabaseError(e))
+                                    }
+                                  })()
+                                }
                                 applyMilestoneDeadlinePlan(milestone.id, nextTarget)
                               }}
                               aria-label="Целевой дедлайн вехи"
@@ -3599,8 +3495,8 @@ function App() {
                               <div className="assignee-cell assignee-cell--inline">
                                 <InlineTaskAssignee
                                   taskId={task.id}
-                                  assignee={task.assignee}
-                                  assigneeOptions={assigneeOptionsState}
+                                  task={task}
+                                  users={users}
                                   updateTask={updateTask}
                                 />
                               </div>
@@ -3676,15 +3572,18 @@ function App() {
                                     placeholder="Название"
                                   />
                                   <select
-                                    value={editingCompletedDraft.assignee}
+                                    value={editingCompletedDraft.assigneeUserId}
                                     onChange={(e) =>
-                                      setEditingCompletedDraft((prev) => ({ ...prev, assignee: e.target.value }))
+                                      setEditingCompletedDraft((prev) => ({
+                                        ...prev,
+                                        assigneeUserId: e.target.value,
+                                      }))
                                     }
                                   >
                                     <option value="">Не назначен</option>
-                                    {assigneeOptionsState.map((person) => (
-                                      <option key={person} value={person}>
-                                        {person}
+                                    {users.map((u) => (
+                                      <option key={u.id} value={u.id}>
+                                        {u.name}
                                       </option>
                                     ))}
                                   </select>
@@ -3743,12 +3642,11 @@ function App() {
                   )}
 
                   <QuickAddTask
-                    key={`${selectedProjectId}-${milestone.id}`}
+                    key={`${resolvedSelectedProjectId}-${milestone.id}`}
                     projectTasks={selectedProject.tasks}
                     todayDateString={todayDateString}
                     onCreate={(payload) => createTaskInMilestone(milestone.id, payload)}
-                    assigneeOptions={assigneeOptionsState}
-                    onAddAssignee={addAssigneeOption}
+                    assigneeUsers={users}
                   />
                   </div>
                 )}
@@ -3807,7 +3705,7 @@ function App() {
       <ProjectGantt
         milestones={milestonesToRender}
         tasksByMilestone={tasksByMilestone}
-        expandedIds={expandedMilestonesByProject[selectedProjectId] ?? []}
+        expandedIds={expandedMilestoneIdsResolved}
         onToggleMilestone={toggleMilestoneExpanded}
         visibleTasks={visibleTasks}
         milestoneDeadline={milestoneDeadline}
@@ -3836,12 +3734,15 @@ function App() {
         <TaskLightPanel
           task={openedTask}
           tasks={selectedProject.tasks}
+          projectId={selectedProject.id}
           projectName={selectedProject.name}
-          assigneeOptions={assigneeOptionsState}
+          assigneeUsers={users}
           currentUser={currentUser}
+          supabase={supabase}
           onUpdateTask={updateTask}
           onDeleteTask={deleteTaskById}
           onClose={() => setOpenedTaskId(null)}
+          refresh={refresh}
         />
       )}
       {showNewProjectModal && (
@@ -3889,6 +3790,51 @@ function App() {
         </div>
       )}
 
+      {showRenameProjectModal && (
+        <div
+          className="project-modal-backdrop"
+          role="presentation"
+          onClick={() => setShowRenameProjectModal(false)}
+        >
+          <div
+            className="project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-project-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="rename-project-title" className="heading-h3">
+              Переименовать проект
+            </h3>
+            <label className="project-modal__field">
+              <span>Название</span>
+              <input
+                value={renameProjectDraft}
+                onChange={(e) => setRenameProjectDraft(e.target.value)}
+                placeholder="Название проекта"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') renameProject()
+                }}
+              />
+            </label>
+            <div className="project-modal__actions">
+              <button type="button" className="btn-secondary" onClick={() => setShowRenameProjectModal(false)}>
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={renameProject}
+                disabled={!renameProjectDraft.trim()}
+              >
+                Сохранить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selectedProject && selectedActiveCount > 0 && (
         <div className="bulk-bar" role="toolbar" aria-label="Массовые действия с задачами">
           <span className="bulk-bar__count">Выбрано: {ruTasksCountLabel(selectedActiveCount)}</span>
@@ -3911,15 +3857,6 @@ function App() {
         </div>
       )}
     </main>
-      <AddUserModal
-        open={addUserOpen}
-        onClose={() => {
-          setAddUserOpen(false)
-          setAddUserError(null)
-        }}
-        onSubmit={submitNewUser}
-        error={addUserError}
-      />
     </>
   )
 }

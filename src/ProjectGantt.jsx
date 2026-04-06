@@ -1,4 +1,4 @@
-import { useCallback, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 const dayMs = 1000 * 60 * 60 * 24
 const GANTT_ROW_H = 52
@@ -149,6 +149,31 @@ export function ProjectGantt({
 
   const [drag, setDrag] = useState(null)
   const viewportRef = useRef(null)
+  /** Сохраняем скролл внутри ганта при перерисовке (масштаб, данные), чтобы не сбрасывалась позиция. */
+  const scrollPreserveRef = useRef({ left: 0, top: 0 })
+
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const onScroll = () => {
+      scrollPreserveRef.current = { left: el.scrollLeft, top: el.scrollTop }
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  useLayoutEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const { left, top } = scrollPreserveRef.current
+    el.scrollLeft = left
+    el.scrollTop = top
+  })
+
+  /** Клик по чипам не должен переводить фокус (иначе браузер скроллит страницу к элементу). */
+  const chipMouseDown = useCallback((e) => {
+    if (e.button === 0) e.preventDefault()
+  }, [])
 
   const barLeftWidth = useCallback(
     (task) => {
@@ -250,6 +275,7 @@ export function ProjectGantt({
           <button
             type="button"
             className={`gantt-chip${autoShift ? ' gantt-chip--active' : ''}`}
+            onMouseDown={chipMouseDown}
             onClick={() => onAutoShiftChange(!autoShift)}
           >
             Автосдвиг зависимых задач
@@ -257,6 +283,7 @@ export function ProjectGantt({
           <button
             type="button"
             className={`gantt-chip${scale === 'week' ? ' gantt-chip--active' : ''}`}
+            onMouseDown={chipMouseDown}
             onClick={() => setScale('week')}
           >
             Неделя
@@ -264,6 +291,7 @@ export function ProjectGantt({
           <button
             type="button"
             className={`gantt-chip${scale === 'month' ? ' gantt-chip--active' : ''}`}
+            onMouseDown={chipMouseDown}
             onClick={() => setScale('month')}
           >
             Месяц
@@ -309,6 +337,7 @@ export function ProjectGantt({
                     type="button"
                     className="gantt-mini-caret"
                     aria-expanded={row.expanded}
+                    onMouseDown={chipMouseDown}
                     onClick={(e) => {
                       e.stopPropagation()
                       onToggleMilestone(row.milestone.id)

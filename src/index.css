@@ -175,3 +175,20 @@ body {
   font-family: var(--font-app);
   color: #1f2937;
 }
+
+/* Видно только в npm run dev — если метки нет, открыт не dev-сервер или старый кэш */
+.dev-mode-indicator {
+  position: fixed;
+  bottom: 10px;
+  right: 10px;
+  z-index: 99999;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: #111827;
+  color: #f9fafb;
+  border-radius: 6px;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
