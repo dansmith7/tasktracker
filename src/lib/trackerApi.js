@@ -63,6 +63,17 @@ function isMissingColumnError(error, columnName) {
   return false
 }
 
+function isMissingFunctionError(error, functionName) {
+  if (!error) return false
+  const code = String(error.code || '').toUpperCase()
+  const msg = String(error.message || '').toLowerCase()
+  const fn = String(functionName || '').toLowerCase()
+  if (code === 'PGRST202') return true
+  if (msg.includes('could not find the function')) return true
+  if (fn && msg.includes(fn) && msg.includes('no matches were found')) return true
+  return false
+}
+
 function removeTaskOptionalFieldsForLegacySchema(row, missingColumn) {
   const next = { ...row }
   if (missingColumn === 'parent_task_id') delete next.parent_task_id
@@ -164,7 +175,11 @@ export async function updateProjectTopicRemote(client, projectId, topicId) {
 /** @param {import('@supabase/supabase-js').SupabaseClient} client */
 export async function deleteProjectRemote(client, projectId) {
   if (isOfflineDevMode()) return localMock.deleteProjectRemote(client, projectId)
-  const r = await client.rpc('delete_project_by_id', { p_project_id: projectId })
+  let r = await client.rpc('delete_project_by_id', { p_project_id: projectId })
+  if (r.error && isMissingFunctionError(r.error, 'delete_project_by_id')) {
+    // Совместимость со схемой без RPC: используем прямой DELETE.
+    r = await client.from('projects').delete().eq('id', projectId)
+  }
   logResult('deleteProject', r)
   if (r.error) throw r.error
 }
