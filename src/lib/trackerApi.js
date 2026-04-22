@@ -39,6 +39,30 @@ export function taskPersistableFieldsDiffer(a, b) {
   )
 }
 
+function isMissingRelationError(error, relationName) {
+  if (!error) return false
+  const code = String(error.code || '').toUpperCase()
+  const msg = String(error.message || '').toLowerCase()
+  const rel = String(relationName || '').toLowerCase()
+  if (code === '42P01') return true
+  if (code === 'PGRST205') return true
+  if (msg.includes('does not exist') && (!rel || msg.includes(rel))) return true
+  if (msg.includes('could not find') && msg.includes('relation')) return true
+  return false
+}
+
+function isMissingColumnError(error, columnName) {
+  if (!error) return false
+  const code = String(error.code || '').toUpperCase()
+  const msg = String(error.message || '').toLowerCase()
+  const col = String(columnName || '').toLowerCase()
+  if (code === '42703') return true
+  if (code === 'PGRST204') return true
+  if (msg.includes('does not exist') && msg.includes('column') && (!col || msg.includes(col))) return true
+  if (msg.includes('could not find') && msg.includes('column') && (!col || msg.includes(col))) return true
+  return false
+}
+
 /**
  * Сохраняет дельту списка задач: insert новых, upsert изменённых, синхронизирует зависимости.
  * @param {import('@supabase/supabase-js').SupabaseClient} client
@@ -329,7 +353,7 @@ export async function fetchProjectsTree(client) {
       .from('topics')
       .select('id, title, position')
       .order('position')
-    if (et && et.code !== '42P01') throw et
+    if (et && !isMissingRelationError(et, 'public.topics')) throw et
     if (!et) {
       topics = (topicRows ?? []).map((t) => ({
         id: t.id,
@@ -347,7 +371,7 @@ export async function fetchProjectsTree(client) {
       .order('created_at')
     if (!withTopic.error) {
       projects = withTopic.data ?? []
-    } else if (withTopic.error.code === '42703') {
+    } else if (isMissingColumnError(withTopic.error, 'topic_id')) {
       const legacy = await client
         .from('projects')
         .select('id, title, created_at')
