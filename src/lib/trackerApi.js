@@ -321,22 +321,43 @@ export async function fetchProjectsTree(client) {
   if (userErr) throw userErr
   if (!user) return { topics: [], projects: [] }
 
-  const { data: topicRows, error: et } = await client
-    .from('topics')
-    .select('id, title, position')
-    .order('position')
-  if (et) throw et
-  const topics = (topicRows ?? []).map((t) => ({
-    id: t.id,
-    name: t.title,
-    position: t.position,
-  }))
+  // Обратная совместимость: если topics/topic_id ещё не применены в подключенной БД,
+  // всё равно загружаем проекты и задачи (проекты будут считаться "Без темы").
+  let topics = []
+  {
+    const { data: topicRows, error: et } = await client
+      .from('topics')
+      .select('id, title, position')
+      .order('position')
+    if (et && et.code !== '42P01') throw et
+    if (!et) {
+      topics = (topicRows ?? []).map((t) => ({
+        id: t.id,
+        name: t.title,
+        position: t.position,
+      }))
+    }
+  }
 
-  const { data: projects, error: e1 } = await client
-    .from('projects')
-    .select('id, title, created_at, topic_id')
-    .order('created_at')
-  if (e1) throw e1
+  let projects = []
+  {
+    const withTopic = await client
+      .from('projects')
+      .select('id, title, created_at, topic_id')
+      .order('created_at')
+    if (!withTopic.error) {
+      projects = withTopic.data ?? []
+    } else if (withTopic.error.code === '42703') {
+      const legacy = await client
+        .from('projects')
+        .select('id, title, created_at')
+        .order('created_at')
+      if (legacy.error) throw legacy.error
+      projects = (legacy.data ?? []).map((p) => ({ ...p, topic_id: null }))
+    } else {
+      throw withTopic.error
+    }
+  }
   if (!projects?.length) return { topics, projects: [] }
   const projectIds = projects.map((p) => p.id)
 
