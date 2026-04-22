@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { fetchProfiles, fetchProjectsTree } from '../lib/trackerApi'
+import { isOfflineDevMode } from '../lib/localDev.js'
+import { fetchProfiles, fetchProjectsTree } from '../lib/trackerApi.js'
 
 const USER_AVATAR_COLORS = ['#60d812', '#3b82f6', '#a855f7', '#f59e0b', '#ec4899', '#14b8a6']
 
@@ -14,24 +15,31 @@ function profileToAppUser(p) {
 }
 
 /**
- * Данные только из Supabase. Realtime и фоновый full-sync отключены — мутации в trackerApi + refresh().
+ * Данные из Supabase или из офлайн-мока (VITE_LOCAL_DEV_MOCK / VITE_DEV_LOGIN_ANY). Realtime отключён.
  * @param {import('@supabase/supabase-js').SupabaseClient | null} supabase
  * @param {string | null} userId
  * @param {boolean} enabled
  */
 export function useTrackerData(supabase, userId, enabled) {
+  const [topics, setTopics] = useState([])
   const [projects, setProjects] = useState([])
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
 
   const refresh = useCallback(async () => {
-    if (!supabase || !enabled) {
+    if (!enabled) {
+      setLoading(false)
+      return
+    }
+    if (!supabase && !isOfflineDevMode()) {
       setLoading(false)
       return
     }
     try {
-      const [tree, profs] = await Promise.all([fetchProjectsTree(supabase), fetchProfiles(supabase)])
-      setProjects(tree)
+      const client = supabase
+      const [tree, profs] = await Promise.all([fetchProjectsTree(client), fetchProfiles(client)])
+      setTopics(tree.topics ?? [])
+      setProjects(tree.projects ?? [])
       setUsers((profs ?? []).map(profileToAppUser))
     } catch (e) {
       console.error(e)
@@ -43,13 +51,21 @@ export function useTrackerData(supabase, userId, enabled) {
   useEffect(() => {
     if (!enabled) {
       setLoading(false)
+      setTopics([])
+      setProjects([])
+      setUsers([])
+      return
+    }
+    if (!supabase && !isOfflineDevMode()) {
+      setLoading(false)
+      setTopics([])
       setProjects([])
       setUsers([])
       return
     }
     setLoading(true)
     void refresh()
-  }, [enabled, refresh])
+  }, [enabled, refresh, supabase])
 
-  return { projects, users, loading, refresh }
+  return { topics, projects, users, loading, refresh }
 }

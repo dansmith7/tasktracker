@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { LoginScreen } from './components/LoginScreen.jsx'
 import { ProfileMissingScreen } from './components/ProfileMissingScreen.jsx'
@@ -7,11 +7,14 @@ import { useTrackerData } from './hooks/useTrackerData.js'
 import {
   createMilestoneRemote,
   createProjectRemote,
+  createTopicRemote,
   deleteCommentRemote,
   deleteMilestoneRemote,
+  deleteProjectRemote,
   deleteTaskAttachmentRemote,
   deleteTaskRemote,
   deleteTasksBulkRemote,
+  deleteTopicRemote,
   formatSupabaseError,
   insertCommentRemote,
   persistProjectTasksDelta,
@@ -19,10 +22,13 @@ import {
   updateMilestoneTitleRemote,
   updateProfileNameRemote,
   updateProjectTitleRemote,
+  updateProjectTopicRemote,
   updateTaskMilestoneRemote,
   updateTasksStatusBulkRemote,
+  updateTopicTitleRemote,
   uploadTaskAttachment,
 } from './lib/trackerApi.js'
+import { canUseDataApi } from './lib/localDev.js'
 import { ProjectGantt } from './ProjectGantt.jsx'
 import './App.css'
 
@@ -363,6 +369,9 @@ function tryApplyTaskDateChange(project, taskId, newStart, newDeadline, autoShif
 function validateTaskMilestoneMove(project, taskId, targetMilestoneKey, ungroupedId) {
   const task = project.tasks.find((t) => t.id === taskId)
   if (!task) return { ok: false, message: 'Веха недоступна' }
+  if (task.parentTaskId) {
+    return { ok: false, message: 'Подзадачу между вехами не переносят — переместите родительскую задачу' }
+  }
   if (task.status === 'Готово') {
     return { ok: false, message: 'Сначала верните задачу в активные' }
   }
@@ -372,9 +381,11 @@ function validateTaskMilestoneMove(project, taskId, targetMilestoneKey, ungroupe
     return { ok: false, message: 'Веха недоступна' }
   }
   const newMilestoneId = targetMilestoneKey === ungroupedId ? null : targetMilestoneKey
-  const nextTasks = project.tasks.map((t) =>
-    t.id === taskId ? { ...t, milestoneId: newMilestoneId } : t,
-  )
+  const nextTasks = project.tasks.map((t) => {
+    if (t.id === taskId) return { ...t, milestoneId: newMilestoneId }
+    if (t.parentTaskId === taskId) return { ...t, milestoneId: newMilestoneId }
+    return t
+  })
   if (hasDependencyCycleInTasks(nextTasks)) {
     return {
       ok: false,
@@ -415,12 +426,6 @@ const getInitials = (name) => {
     .slice(0, 2)
     .toUpperCase()
 }
-
-const nowTimeLabel = () =>
-  new Date().toLocaleTimeString('ru-RU', {
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 
 const maxDate = (dates) => {
   if (!dates.length) return null
@@ -607,10 +612,20 @@ function CurrentUserMenu({ currentUser, onSignOut, onSaveDisplayName }) {
   )
 }
 
-function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeUsers }) {
+function QuickAddTask({
+  projectTasks,
+  todayDateString,
+  onCreate,
+  assigneeUsers,
+  addButtonLabel = 'Добавить задачу',
+  titlePlaceholder = 'Добавить задачу…',
+  submitButtonLabel = 'Создать',
+  initialCollapsed = true,
+  ariaLabelParams = 'Параметры задачи',
+}) {
   const titleInputId = useId()
 
-  const [collapsed, setCollapsed] = useState(true)
+  const [collapsed, setCollapsed] = useState(initialCollapsed)
   const [title, setTitle] = useState('')
   const [assigneeUserId, setAssigneeUserId] = useState('')
   const [deadline, setDeadline] = useState(todayDateString)
@@ -763,7 +778,7 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeUsers }
           <span className="quick-add-plus" aria-hidden>
             +
           </span>
-          Добавить задачу
+          {addButtonLabel}
         </button>
       </div>
     )
@@ -793,16 +808,16 @@ function QuickAddTask({ projectTasks, todayDateString, onCreate, assigneeUsers }
             ref={titleRef}
             className="quick-add-main__input"
             value={title}
-            placeholder="Добавить задачу…"
+            placeholder={titlePlaceholder}
             onChange={(e) => setTitle(e.target.value)}
             aria-label="Название задачи"
           />
           <button type="submit" className="btn-primary quick-add-main__submit" disabled={!title.trim()}>
-            Создать
+            {submitButtonLabel}
           </button>
         </div>
 
-        <div className="quick-add-pills" role="group" aria-label="Параметры задачи">
+        <div className="quick-add-pills" role="group" aria-label={ariaLabelParams}>
             <div className="quick-add-pill-slot" ref={dueWrapRef}>
               <button
                 type="button"
@@ -1398,6 +1413,7 @@ function TaskLightPanel({
   assigneeUsers,
   currentUser,
   supabase,
+  apiConnected,
   onUpdateTask,
   onDeleteTask,
   onClose,
@@ -1471,7 +1487,7 @@ function TaskLightPanel({
   const submitComment = () => {
     const text = commentText.trim()
     if (!text) return
-    if (!supabase) {
+    if (!apiConnected) {
       setAttachmentError('Комментарии недоступны без подключения к серверу')
       return
     }
@@ -1494,7 +1510,7 @@ function TaskLightPanel({
   }
 
   const removeComment = (commentId) => {
-    if (!supabase) return
+    if (!apiConnected) return
     void (async () => {
       try {
         await deleteCommentRemote(supabase, commentId)
@@ -1512,7 +1528,7 @@ function TaskLightPanel({
     const att = attachments.find((a) => a.id === attachmentId)
     if (!att) return
     const isBlob = att.fileUrl?.startsWith('blob:')
-    if (supabase && !isBlob) {
+    if (apiConnected && !isBlob) {
       try {
         await deleteTaskAttachmentRemote(supabase, att)
         await refresh()
@@ -1543,7 +1559,7 @@ function TaskLightPanel({
         await readFileForProgress(file, (p) => {
           setUploading((u) => u.map((x) => (x.id === uploadId ? { ...x, progress: p } : x)))
         })
-        if (!supabase || !projectId) {
+        if (!apiConnected || !projectId) {
           setAttachmentError('Загрузка файлов недоступна')
           continue
         }
@@ -1600,7 +1616,7 @@ function TaskLightPanel({
   }
 
   const depCandidates = tasks
-    .filter((t) => t.id !== task.id)
+    .filter((t) => t.id !== task.id && !t.parentTaskId)
     .filter((t) => !depSearch.trim() || t.title.toLowerCase().includes(depSearch.trim().toLowerCase()))
 
   return (
@@ -1618,7 +1634,7 @@ function TaskLightPanel({
         <header className="task-panel__head">
           <div className="task-panel__topline">
             <p className="task-panel__eyebrow">
-              Задача • {projectName} •{' '}
+              {task.parentTaskId ? 'Подзадача' : 'Задача'} • {projectName} •{' '}
               <span className={`task-panel__priority-eyebrow task-panel__priority-eyebrow--${priorityKey}`}>
                 {priorityLabel(task.priority)}
               </span>
@@ -1870,13 +1886,6 @@ function TaskLightPanel({
                 </button>
               </div>
               <div className="task-panel__comment-actions">
-                <button
-                  type="button"
-                  className="btn-secondary btn-secondary--danger"
-                  onClick={() => onDeleteTask(task.id)}
-                >
-                  Удалить задачу
-                </button>
                 <button type="button" className="btn-primary" onClick={submitComment}>
                   Отправить
                 </button>
@@ -1884,6 +1893,25 @@ function TaskLightPanel({
             </div>
           </section>
         </div>
+
+        <footer className="task-panel__footer">
+          {task.status !== 'Готово' ? (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => onUpdateTask(task.id, { status: 'Готово' })}
+            >
+              Завершить
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn-secondary btn-secondary--danger"
+            onClick={() => onDeleteTask(task.id)}
+          >
+            Удалить задачу
+          </button>
+        </footer>
       </article>
     </div>
   )
@@ -1901,7 +1929,9 @@ function App() {
     signOut,
     configured,
     refreshProfile,
+    devLoginAny,
   } = useAuth()
+  const apiConnected = canUseDataApi(supabase)
   const currentUserId = session?.user?.id ?? null
 
   const currentUser = useMemo(() => {
@@ -1918,7 +1948,7 @@ function App() {
   }, [session, profile])
 
   const dataEnabled = Boolean(configured && currentUserId && profile && !profileError)
-  const { projects, users, loading: dataLoading, refresh } = useTrackerData(
+  const { topics, projects, users, loading: dataLoading, refresh } = useTrackerData(
     supabase,
     currentUserId,
     dataEnabled,
@@ -1926,12 +1956,12 @@ function App() {
 
   const saveUserDisplayName = useCallback(
     async (name) => {
-      if (!supabase || !currentUserId) throw new Error('Нет подключения')
+      if (!apiConnected || !currentUserId) throw new Error('Нет подключения')
       await updateProfileNameRemote(supabase, currentUserId, name)
       await refreshProfile()
       await refresh()
     },
-    [supabase, currentUserId, refreshProfile, refresh],
+    [apiConnected, supabase, currentUserId, refreshProfile, refresh],
   )
 
   const [mineFilterActive, setMineFilterActive] = useState(false)
@@ -1957,6 +1987,8 @@ function App() {
   const [autoShiftDependents, setAutoShiftDependents] = useState(true)
 
   const [selectedProjectId, setSelectedProjectId] = useState('')
+  /** Фильтр проектов по теме: all | none | topicId */
+  const [selectedTopicFilter, setSelectedTopicFilter] = useState('all')
   const [selectedTaskIds, setSelectedTaskIds] = useState([])
   /** `${projectId}:${milestoneId}` → развёрнут блок завершённых */
   const [expandedCompletedSections, setExpandedCompletedSections] = useState({})
@@ -1967,6 +1999,7 @@ function App() {
     deadline: todayLocalDate(),
   })
   const [expandedMilestonesByProject, setExpandedMilestonesByProject] = useState({})
+  const [milestoneAssigneeFilters, setMilestoneAssigneeFilters] = useState({})
   const [milestonePlan, setMilestonePlan] = useState({})
   const [violatingTaskIds, setViolatingTaskIds] = useState([])
   const [dependencyError, setDependencyError] = useState(null)
@@ -1977,8 +2010,16 @@ function App() {
   const moveTaskToMilestoneLockRef = useRef(false)
   const [showNewProjectModal, setShowNewProjectModal] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  /** Тема для нового проекта (null — без темы). */
+  const [newProjectTopicId, setNewProjectTopicId] = useState(null)
+  const [showNewTopicModal, setShowNewTopicModal] = useState(false)
+  const [newTopicDraft, setNewTopicDraft] = useState('')
   const [showRenameProjectModal, setShowRenameProjectModal] = useState(false)
   const [renameProjectDraft, setRenameProjectDraft] = useState('')
+  const [renameProjectTopicId, setRenameProjectTopicId] = useState(null)
+  const [showEditTopicModal, setShowEditTopicModal] = useState(false)
+  const [editTopicDraft, setEditTopicDraft] = useState('')
+  const [editTopicId, setEditTopicId] = useState(null)
   const [openedTaskId, setOpenedTaskId] = useState(null)
   const [editingMilestoneTitleId, setEditingMilestoneTitleId] = useState(null)
   const [editingMilestoneTitleDraft, setEditingMilestoneTitleDraft] = useState('')
@@ -1988,19 +2029,85 @@ function App() {
   const addMilestoneInputRef = useRef(null)
   const addMilestoneAnchorRef = useRef(null)
   const newMilestoneFieldId = useId()
+  /** Раскрытые блоки подзадач у корневой задачи (только id корня). */
+  const [expandedSubtaskParents, setExpandedSubtaskParents] = useState(() => new Set())
+
+  const visibleProjects = useMemo(() => {
+    if (selectedTopicFilter === 'all') return projects
+    if (selectedTopicFilter === 'none') return projects.filter((p) => !p.topicId)
+    return projects.filter((p) => p.topicId === selectedTopicFilter)
+  }, [projects, selectedTopicFilter])
+  const selectedTopicLabel = useMemo(() => {
+    if (selectedTopicFilter === 'all') return 'Все темы'
+    if (selectedTopicFilter === 'none') return 'Без темы'
+    return topics.find((t) => t.id === selectedTopicFilter)?.name ?? 'Тема'
+  }, [selectedTopicFilter, topics])
+  const topicProjectCounts = useMemo(() => {
+    const byId = new Map()
+    let none = 0
+    for (const p of projects) {
+      if (!p.topicId) {
+        none += 1
+        continue
+      }
+      byId.set(p.topicId, (byId.get(p.topicId) ?? 0) + 1)
+    }
+    return { all: projects.length, none, byId }
+  }, [projects])
+  const projectsByTopic = useMemo(() => {
+    const byTopic = new Map()
+    const withoutTopic = []
+    for (const p of projects) {
+      if (!p.topicId) {
+        withoutTopic.push(p)
+        continue
+      }
+      const arr = byTopic.get(p.topicId)
+      if (arr) arr.push(p)
+      else byTopic.set(p.topicId, [p])
+    }
+    return { byTopic, withoutTopic }
+  }, [projects])
+  const groupedVisibleProjects = useMemo(() => {
+    if (selectedTopicFilter === 'all') {
+      const groups = []
+      if (projectsByTopic.withoutTopic.length) {
+        groups.push({
+          key: 'none',
+          label: 'Без темы',
+          projects: projectsByTopic.withoutTopic,
+        })
+      }
+      for (const t of topics) {
+        const grouped = projectsByTopic.byTopic.get(t.id) ?? []
+        if (grouped.length) groups.push({ key: t.id, label: t.name, projects: grouped })
+      }
+      return groups
+    }
+    if (selectedTopicFilter === 'none') {
+      return [{ key: 'none', label: 'Без темы', projects: projectsByTopic.withoutTopic }]
+    }
+    return [
+      {
+        key: selectedTopicFilter,
+        label: topics.find((t) => t.id === selectedTopicFilter)?.name ?? 'Тема',
+        projects: projectsByTopic.byTopic.get(selectedTopicFilter) ?? [],
+      },
+    ]
+  }, [selectedTopicFilter, topics, projectsByTopic])
 
   const resolvedSelectedProjectId = useMemo(() => {
-    if (!projects.length) return ''
-    if (selectedProjectId && projects.some((p) => p.id === selectedProjectId)) return selectedProjectId
-    return projects[0].id
-  }, [projects, selectedProjectId])
+    if (!visibleProjects.length) return ''
+    if (selectedProjectId && visibleProjects.some((p) => p.id === selectedProjectId)) return selectedProjectId
+    return visibleProjects[0].id
+  }, [visibleProjects, selectedProjectId])
 
   const selectedProject = useMemo(
     () =>
       resolvedSelectedProjectId
-        ? projects.find((project) => project.id === resolvedSelectedProjectId) ?? null
+        ? visibleProjects.find((project) => project.id === resolvedSelectedProjectId) ?? null
         : null,
-    [projects, resolvedSelectedProjectId, projects],
+    [visibleProjects, resolvedSelectedProjectId],
   )
   const openedTask = useMemo(
     () => selectedProject?.tasks.find((t) => t.id === openedTaskId) ?? null,
@@ -2017,10 +2124,17 @@ function App() {
     expandedMilestonesByProject[resolvedSelectedProjectId] ?? allExpandedMilestoneIds
 
   useEffect(() => {
-    if (projects.length === 0) return
-    const valid = Boolean(selectedProjectId && projects.some((p) => p.id === selectedProjectId))
-    if (!valid) setSelectedProjectId(projects[0].id)
-  }, [projects, selectedProjectId])
+    if (visibleProjects.length === 0) return
+    const valid = Boolean(selectedProjectId && visibleProjects.some((p) => p.id === selectedProjectId))
+    if (!valid) setSelectedProjectId(visibleProjects[0].id)
+  }, [visibleProjects, selectedProjectId])
+
+  useEffect(() => {
+    if (selectedTopicFilter === 'all' || selectedTopicFilter === 'none') return
+    if (!topics.some((t) => t.id === selectedTopicFilter)) {
+      setSelectedTopicFilter('all')
+    }
+  }, [topics, selectedTopicFilter])
 
   useEffect(() => {
     setEditingMilestoneTitleId(null)
@@ -2060,23 +2174,11 @@ function App() {
     setTaskMoveNotice(null)
   }
 
-  const TAB_SHOW_ALL_MAX = 7
-  const TAB_OVERFLOW_VISIBLE = 5
-  const { primaryTabs, overflowTabs } = useMemo(() => {
-    if (projects.length <= TAB_SHOW_ALL_MAX) {
-      return { primaryTabs: projects, overflowTabs: [] }
-    }
-    return {
-      primaryTabs: projects.slice(0, TAB_OVERFLOW_VISIBLE),
-      overflowTabs: projects.slice(TAB_OVERFLOW_VISIBLE),
-    }
-  }, [projects])
-
   const createProject = async () => {
     const name = newProjectName.trim()
-    if (!name || !supabase || !currentUserId) return
+    if (!name || !apiConnected || !currentUserId) return
     try {
-      const id = await createProjectRemote(supabase, name, currentUserId)
+      const id = await createProjectRemote(supabase, name, currentUserId, newProjectTopicId)
       await refresh()
       setExpandedMilestonesByProject((prev) => ({
         ...prev,
@@ -2084,6 +2186,7 @@ function App() {
       }))
       setSelectedProjectId(id)
       setNewProjectName('')
+      setNewProjectTopicId(null)
       setShowNewProjectModal(false)
       setSelectedTaskIds([])
       setViolatingTaskIds([])
@@ -2096,17 +2199,115 @@ function App() {
 
   const renameProject = async () => {
     const name = renameProjectDraft.trim()
-    if (!name || !supabase || !resolvedSelectedProjectId) return
+    if (!name || !apiConnected || !resolvedSelectedProjectId) return
     try {
-      await updateProjectTitleRemote(supabase, resolvedSelectedProjectId, name)
+      await Promise.all([
+        updateProjectTitleRemote(supabase, resolvedSelectedProjectId, name),
+        updateProjectTopicRemote(supabase, resolvedSelectedProjectId, renameProjectTopicId ?? null),
+      ])
       await refresh()
       setShowRenameProjectModal(false)
       setRenameProjectDraft('')
+      setRenameProjectTopicId(null)
       setDependencyError(null)
     } catch (e) {
       console.error(e)
       setDependencyError(`Не удалось переименовать проект: ${formatSupabaseError(e)}`)
     }
+  }
+
+  const removeProject = async () => {
+    if (!apiConnected || !resolvedSelectedProjectId || !currentUserId) return
+    if (!window.confirm('Удалить проект и все его задачи? Это действие необратимо.')) return
+    try {
+      await deleteProjectRemote(supabase, resolvedSelectedProjectId)
+      await refresh()
+      setShowRenameProjectModal(false)
+      setRenameProjectDraft('')
+      setRenameProjectTopicId(null)
+      setSelectedProjectId('')
+      setSelectedTaskIds([])
+      setOpenedTaskId(null)
+      setDependencyError(null)
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось удалить проект: ${formatSupabaseError(e)}`)
+    }
+  }
+
+  const handleCreateTopic = async (title) => {
+    if (!apiConnected || !currentUserId) return
+    try {
+      await createTopicRemote(supabase, title, currentUserId)
+      await refresh()
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось создать тему: ${formatSupabaseError(e)}`)
+    }
+  }
+
+  const handleRenameTopic = async (topicId, title) => {
+    if (!apiConnected) return
+    try {
+      await updateTopicTitleRemote(supabase, topicId, title)
+      await refresh()
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось переименовать тему: ${formatSupabaseError(e)}`)
+    }
+  }
+
+  const handleDeleteTopic = async (topicId) => {
+    if (!apiConnected) return
+    try {
+      await deleteTopicRemote(supabase, topicId)
+      await refresh()
+    } catch (e) {
+      console.error(e)
+      setDependencyError(`Не удалось удалить тему: ${formatSupabaseError(e)}`)
+    }
+  }
+
+  const createTopicFromModal = async () => {
+    const title = (newTopicDraft || '').trim()
+    if (!title) return
+    await handleCreateTopic(title)
+    setShowNewTopicModal(false)
+    setNewTopicDraft('')
+  }
+
+  const openEditTopicModal = () => {
+    const topicId =
+      selectedTopicFilter !== 'all' && selectedTopicFilter !== 'none'
+        ? selectedTopicFilter
+        : (selectedProject?.topicId ?? null)
+    if (!topicId) {
+      setDependencyError('Выберите тему в фильтре или проект внутри темы')
+      return
+    }
+    const topic = topics.find((t) => t.id === topicId)
+    if (!topic) return
+    setEditTopicId(topic.id)
+    setEditTopicDraft(topic.name)
+    setShowEditTopicModal(true)
+  }
+
+  const saveEditedTopic = async () => {
+    const title = (editTopicDraft || '').trim()
+    if (!editTopicId || !title) return
+    await handleRenameTopic(editTopicId, title)
+    setShowEditTopicModal(false)
+    setEditTopicId(null)
+    setEditTopicDraft('')
+  }
+
+  const removeEditedTopic = async () => {
+    if (!editTopicId) return
+    if (!window.confirm('Удалить тему? Проекты останутся без темы.')) return
+    await handleDeleteTopic(editTopicId)
+    setShowEditTopicModal(false)
+    setEditTopicId(null)
+    setEditTopicDraft('')
   }
 
   const groupedMilestones = useMemo(() => {
@@ -2117,20 +2318,45 @@ function App() {
     ]
   }, [selectedProject])
 
+  /** Корневые задачи (подзадачи — под родителем в таблице). Гант и «ближайшие» — только корни, без подзадач. */
   const visibleTasks = useMemo(() => {
     if (!selectedProject) return []
-    if (!mineFilterActive || !currentUserId) return selectedProject.tasks
-    return selectedProject.tasks.filter(
-      (t) => resolveTaskAssigneeId(t, users) === currentUserId,
-    )
+    const roots = selectedProject.tasks.filter((t) => !t.parentTaskId)
+    if (!mineFilterActive || !currentUserId) return roots
+    return roots.filter((t) => resolveTaskAssigneeId(t, users) === currentUserId)
   }, [selectedProject, mineFilterActive, currentUserId, users])
+
+  const subtasksByParentId = useMemo(() => {
+    if (!selectedProject) return {}
+    const map = {}
+    for (const t of selectedProject.tasks) {
+      if (!t.parentTaskId) continue
+      if (!map[t.parentTaskId]) map[t.parentTaskId] = []
+      map[t.parentTaskId].push(t)
+    }
+    for (const k of Object.keys(map)) {
+      map[k] = map[k].slice().sort((a, b) => toDate(a.deadline) - toDate(b.deadline))
+    }
+    return map
+  }, [selectedProject])
 
   const countTasksForProject = useCallback(
     (project) => {
-      if (!mineFilterActive || !currentUserId) return project.tasks.length
-      return project.tasks.filter((t) => resolveTaskAssigneeId(t, users) === currentUserId).length
+      const roots = project.tasks.filter((t) => !t.parentTaskId && t.status !== 'Готово')
+      if (!mineFilterActive || !currentUserId) return roots.length
+      return roots.filter((t) => resolveTaskAssigneeId(t, users) === currentUserId).length
     },
     [mineFilterActive, currentUserId, users],
+  )
+
+  const matchesMilestoneAssigneeFilter = useCallback(
+    (task, filterValue) => {
+      if (!filterValue || filterValue === 'all') return true
+      const assigneeId = resolveTaskAssigneeId(task, users)
+      if (filterValue === 'none') return !assigneeId
+      return assigneeId === filterValue
+    },
+    [users],
   )
 
   const tasksByMilestone = useMemo(() => {
@@ -2188,8 +2414,8 @@ function App() {
 
     void (async () => {
       const project = projects.find((p) => p.id === resolvedSelectedProjectId)
-      if (!project || !supabase || !currentUserId || !dataEnabled) {
-        if (!supabase || !currentUserId || !dataEnabled) {
+      if (!project || !apiConnected || !currentUserId || !dataEnabled) {
+        if (!apiConnected || !currentUserId || !dataEnabled) {
           setDependencyError('Сохранение недоступно: нет подключения или авторизации')
         }
         return
@@ -2210,6 +2436,16 @@ function App() {
 
       let merged = { ...oldTask, ...patchWithActor }
       let tasks = project.tasks.map((t) => (t.id === taskId ? merged : t))
+
+      // При завершении корневой задачи автоматически переводим её подзадачи в "Готово",
+      // чтобы они попадали в блок "Завершённые" вместе с родителем.
+      if (patchWithActor.status === 'Готово' && !oldTask.parentTaskId) {
+        tasks = tasks.map((t) =>
+          t.parentTaskId === taskId && t.status !== 'Готово'
+            ? { ...t, status: 'Готово', updatedBy: currentUserId }
+            : t,
+        )
+      }
 
       if (patchWithActor.dependsOnTaskId !== undefined && merged.dependsOnTaskId) {
         const parent = tasks.find((t) => t.id === merged.dependsOnTaskId)
@@ -2248,7 +2484,7 @@ function App() {
         return
       }
       setDependencyError(null)
-      if (!supabase || !currentUserId || !dataEnabled) return
+      if (!apiConnected || !currentUserId || !dataEnabled) return
       void (async () => {
         try {
           await persistProjectTasksDelta(
@@ -2265,7 +2501,7 @@ function App() {
         }
       })()
     },
-    [selectedProject, resolvedSelectedProjectId, autoShiftDependents, supabase, currentUserId, dataEnabled, refresh],
+    [selectedProject, autoShiftDependents, apiConnected, supabase, currentUserId, dataEnabled, refresh],
   )
 
   const toggleTaskSelection = (taskId) => {
@@ -2289,13 +2525,17 @@ function App() {
         return
       }
       const newMilestoneId = targetMilestoneKey === ungroupedMilestoneId ? null : targetMilestoneKey
-      if (!supabase || !currentUserId || !dataEnabled) {
+      if (!apiConnected || !currentUserId || !dataEnabled) {
         setTaskMoveNotice({ variant: 'error', text: 'Сохранение недоступно' })
         return
       }
       moveTaskToMilestoneLockRef.current = true
       try {
         await updateTaskMilestoneRemote(supabase, taskId, currentUserId, newMilestoneId)
+        const childIds = selectedProject.tasks.filter((t) => t.parentTaskId === taskId).map((t) => t.id)
+        for (const cid of childIds) {
+          await updateTaskMilestoneRemote(supabase, cid, currentUserId, newMilestoneId)
+        }
         await refresh()
         setSelectedTaskIds((prev) => prev.filter((id) => id !== taskId))
         setDependencyError(null)
@@ -2316,7 +2556,7 @@ function App() {
         moveTaskToMilestoneLockRef.current = false
       }
     },
-    [selectedProject, resolvedSelectedProjectId, supabase, currentUserId, dataEnabled, refresh, allExpandedMilestoneIds],
+    [selectedProject, resolvedSelectedProjectId, apiConnected, supabase, currentUserId, dataEnabled, refresh, allExpandedMilestoneIds],
   )
 
   useEffect(() => {
@@ -2326,54 +2566,83 @@ function App() {
     return () => clearTimeout(t)
   }, [taskMoveNotice])
 
+  /** Корни, видимые в таблице вех (учёт «Мои»). Подзадачи считаем видимыми, если виден родитель-корень. */
   const selectedActiveCount = useMemo(() => {
     if (!selectedProject) return 0
-    const visibleIds = new Set(visibleTasks.map((t) => t.id))
-    return selectedTaskIds.filter((id) => {
-      if (!visibleIds.has(id)) return false
+    const visibleRootIds = new Set(visibleTasks.map((t) => t.id))
+    const isSelectableActive = (id) => {
       const t = selectedProject.tasks.find((x) => x.id === id)
-      return t && t.status !== 'Готово'
-    }).length
+      if (!t || t.status === 'Готово') return false
+      if (visibleRootIds.has(id)) return true
+      if (!t.parentTaskId) return false
+      const parent = selectedProject.tasks.find((p) => p.id === t.parentTaskId)
+      return Boolean(parent && !parent.parentTaskId && visibleRootIds.has(parent.id))
+    }
+    return selectedTaskIds.filter(isSelectableActive).length
   }, [selectedProject, selectedTaskIds, visibleTasks])
 
   useEffect(() => {
     if (!selectedProject) return
     setSelectedTaskIds((prev) => {
-      let next = prev.filter((id) => {
+      const visibleRootIds = new Set(visibleTasks.map((t) => t.id))
+      const stillSelectable = (id) => {
         const t = selectedProject.tasks.find((x) => x.id === id)
-        return t && t.status !== 'Готово'
-      })
-      if (mineFilterActive && currentUserId) {
-        const vis = new Set(visibleTasks.map((t) => t.id))
-        next = next.filter((id) => vis.has(id))
+        if (!t || t.status === 'Готово') return false
+        if (visibleRootIds.has(id)) return true
+        if (!t.parentTaskId) return false
+        const parent = selectedProject.tasks.find((p) => p.id === t.parentTaskId)
+        return Boolean(parent && !parent.parentTaskId && visibleRootIds.has(parent.id))
       }
+      let next = prev.filter(stillSelectable)
       return next.length === prev.length ? prev : next
     })
-  }, [selectedProject, selectedProject?.tasks, mineFilterActive, currentUserId, visibleTasks])
+  }, [selectedProject, selectedProject?.tasks, visibleTasks])
 
-  const visibleViolatingTaskIds = useMemo(
-    () => violatingTaskIds.filter((id) => visibleTasks.some((t) => t.id === id)),
-    [violatingTaskIds, visibleTasks],
-  )
+  const visibleViolatingTaskIds = useMemo(() => {
+    if (!selectedProject) return []
+    return violatingTaskIds.filter((id) => {
+      const task = selectedProject.tasks.find((t) => t.id === id)
+      if (!task) return false
+      if (!mineFilterActive || !currentUserId) return true
+      return resolveTaskAssigneeId(task, users) === currentUserId
+    })
+  }, [violatingTaskIds, selectedProject, mineFilterActive, currentUserId, users])
 
   useEffect(() => {
     if (!openedTaskId || !selectedProject) return
     if (!mineFilterActive || !currentUserId) return
-    if (!visibleTasks.some((t) => t.id === openedTaskId)) setOpenedTaskId(null)
+    const t = selectedProject.tasks.find((x) => x.id === openedTaskId)
+    if (!t) {
+      setOpenedTaskId(null)
+      return
+    }
+    if (!t.parentTaskId) {
+      if (!visibleTasks.some((x) => x.id === t.id)) setOpenedTaskId(null)
+      return
+    }
+    const parent = selectedProject.tasks.find((x) => x.id === t.parentTaskId)
+    if (!parent || !visibleTasks.some((x) => x.id === parent.id)) setOpenedTaskId(null)
   }, [mineFilterActive, openedTaskId, selectedProject, visibleTasks, currentUserId])
 
   const bulkCompleteSelected = () => {
-    if (!selectedProject || !supabase || !currentUserId || !dataEnabled) return
+    if (!selectedProject || !apiConnected || !currentUserId || !dataEnabled) return
     const ids = selectedTaskIds.filter((id) => {
       const t = selectedProject.tasks.find((x) => x.id === id)
       return t && t.status !== 'Готово'
     })
     if (ids.length === 0) return
+    const withChildren = new Set(ids)
+    selectedProject.tasks.forEach((t) => {
+      if (t.parentTaskId && withChildren.has(t.parentTaskId) && t.status !== 'Готово') {
+        withChildren.add(t.id)
+      }
+    })
+    const allIds = [...withChildren]
     void (async () => {
       try {
-        await updateTasksStatusBulkRemote(supabase, currentUserId, ids, 'Готово')
+        await updateTasksStatusBulkRemote(supabase, currentUserId, allIds, 'Готово')
         await refresh()
-        setSelectedTaskIds((prev) => prev.filter((id) => !ids.includes(id)))
+        setSelectedTaskIds((prev) => prev.filter((id) => !allIds.includes(id)))
       } catch (e) {
         console.error(e)
         setDependencyError(formatSupabaseError(e))
@@ -2382,7 +2651,7 @@ function App() {
   }
 
   const bulkDeleteSelected = () => {
-    if (!selectedProject || !supabase || !dataEnabled) return
+    if (!selectedProject || !apiConnected || !dataEnabled) return
     const ids = selectedTaskIds.filter((id) => {
       const t = selectedProject.tasks.find((x) => x.id === id)
       return t && t.status !== 'Готово'
@@ -2394,7 +2663,7 @@ function App() {
           const t = selectedProject.tasks.find((x) => x.id === id)
           if (t) revokeTaskAttachmentUrls(t)
         }
-        await deleteTasksBulkRemote(supabase, ids)
+        await deleteTasksBulkRemote(supabase, ids, currentUserId)
         await refresh()
         setSelectedTaskIds([])
       } catch (e) {
@@ -2406,7 +2675,7 @@ function App() {
 
   const deleteTaskById = (taskId) => {
     if (!window.confirm('Удалить задачу?')) return
-    if (!supabase || !dataEnabled) {
+    if (!apiConnected || !dataEnabled) {
       setDependencyError('Сохранение недоступно')
       return
     }
@@ -2415,7 +2684,7 @@ function App() {
       const taskToKill = project?.tasks.find((t) => t.id === taskId)
       if (taskToKill) revokeTaskAttachmentUrls(taskToKill)
       try {
-        await deleteTaskRemote(supabase, taskId)
+        await deleteTaskRemote(supabase, taskId, currentUserId)
         await refresh()
         setSelectedTaskIds((prev) => prev.filter((id) => id !== taskId))
         setOpenedTaskId(null)
@@ -2435,7 +2704,7 @@ function App() {
   }
 
   const restoreCompletedTask = (taskId) => {
-    if (!supabase || !currentUserId || !dataEnabled) return
+    if (!apiConnected || !currentUserId || !dataEnabled) return
     void (async () => {
       try {
         await updateTasksStatusBulkRemote(supabase, currentUserId, [taskId], 'В работе')
@@ -2449,13 +2718,13 @@ function App() {
   }
 
   const deleteCompletedTask = (taskId) => {
-    if (!supabase || !dataEnabled) return
+    if (!apiConnected || !dataEnabled) return
     void (async () => {
       const project = projects.find((p) => p.id === resolvedSelectedProjectId)
       const taskToKill = project?.tasks.find((t) => t.id === taskId)
       if (taskToKill) revokeTaskAttachmentUrls(taskToKill)
       try {
-        await deleteTaskRemote(supabase, taskId)
+        await deleteTaskRemote(supabase, taskId, currentUserId)
         await refresh()
         if (editingCompletedTaskId === taskId) setEditingCompletedTaskId(null)
         if (openedTaskId === taskId) setOpenedTaskId(null)
@@ -2481,7 +2750,7 @@ function App() {
     const uid = editingCompletedDraft.assigneeUserId
     const assigneeUser = uid ? users.find((u) => u.id === uid) : null
     const project = projects.find((p) => p.id === resolvedSelectedProjectId)
-    if (!project || !supabase || !currentUserId || !dataEnabled) return
+    if (!project || !apiConnected || !currentUserId || !dataEnabled) return
     const newTasks = project.tasks.map((t) =>
       t.id === taskId
         ? {
@@ -2523,7 +2792,7 @@ function App() {
     if (!ids.length) return
     const idSet = new Set(ids)
     const project = projects.find((p) => p.id === resolvedSelectedProjectId)
-    if (!project || !supabase || !currentUserId || !dataEnabled) return
+    if (!project || !apiConnected || !currentUserId || !dataEnabled) return
     let tasks = project.tasks.map((task) =>
       idSet.has(task.id)
         ? {
@@ -2552,7 +2821,7 @@ function App() {
 
   const createTaskInMilestone = (milestoneId, { title, assigneeUserId, deadline, dependsOnTaskId, comment }) => {
     if (!title.trim() || !selectedProject) return
-    if (!supabase || !currentUserId || !dataEnabled) {
+    if (!apiConnected || !currentUserId || !dataEnabled) {
       setDependencyError('Сохранение недоступно')
       return
     }
@@ -2612,6 +2881,70 @@ function App() {
     })()
   }
 
+  const toggleSubtaskExpand = (parentId) => {
+    setExpandedSubtaskParents((prev) => {
+      const next = new Set(prev)
+      if (prev.has(parentId)) next.delete(parentId)
+      else next.add(parentId)
+      return next
+    })
+  }
+
+  const createSubtaskFromQuickAdd = (parentId, { title, assigneeUserId, deadline, dependsOnTaskId, comment }) => {
+    if (!title.trim() || !selectedProject) return
+    const parent = selectedProject.tasks.find((t) => t.id === parentId)
+    if (!parent || parent.parentTaskId) return
+    if (!apiConnected || !currentUserId || !dataEnabled) {
+      setDependencyError('Сохранение недоступно')
+      return
+    }
+    const id = crypto.randomUUID()
+    const assigneeUser = assigneeUserId ? users.find((u) => u.id === assigneeUserId) : null
+    let merged = {
+      id,
+      parentTaskId: parentId,
+      title: title.trim(),
+      description: (comment || '').trim(),
+      status: 'В работе',
+      assignee: assigneeUser?.name ?? '',
+      assigneeId: assigneeUser?.id,
+      startDate: todayLocalDate(),
+      deadline: deadline || todayLocalDate(),
+      milestoneId: parent.milestoneId ?? null,
+      priority: 'medium',
+      dependsOnTaskId: dependsOnTaskId || null,
+      comment: '',
+      attachments: [],
+      comments: [],
+      createdBy: currentUserId ?? undefined,
+      updatedBy: currentUserId ?? undefined,
+    }
+    if (merged.dependsOnTaskId) {
+      if (wouldDependencyCreateCycle(selectedProject.tasks, id, merged.dependsOnTaskId)) {
+        setDependencyError(DEPENDENCY_CYCLE_MESSAGE)
+        return
+      }
+      setDependencyError(null)
+    } else {
+      setDependencyError(null)
+    }
+    let tasks = [...selectedProject.tasks]
+    if (merged.dependsOnTaskId) {
+      const depRoot = tasks.find((t) => t.id === merged.dependsOnTaskId)
+      if (depRoot) merged = rescheduleChildFromParent(depRoot, merged)
+    }
+    tasks = [...tasks, merged]
+    void (async () => {
+      try {
+        await persistProjectTasksDelta(supabase, selectedProject.id, currentUserId, selectedProject.tasks, tasks)
+        await refresh()
+      } catch (e) {
+        console.error(e)
+        setDependencyError(formatSupabaseError(e))
+      }
+    })()
+  }
+
   const applyMilestoneDeadlinePlan = (milestoneId, targetParam) => {
     const plan = milestonePlan[milestoneId]
     const target = targetParam ?? plan?.target
@@ -2632,13 +2965,21 @@ function App() {
     }
 
     if (mode === 'highlight') {
-      setViolatingTaskIds(tasks.filter((task) => diffDays(task.deadline, target) > 0).map((t) => t.id))
+      const subtasksForRoots =
+        selectedProject?.tasks.filter(
+          (t) =>
+            t.parentTaskId &&
+            t.status !== 'Готово' &&
+            tasks.some((r) => r.id === t.parentTaskId),
+        ) ?? []
+      const combined = [...tasks, ...subtasksForRoots]
+      setViolatingTaskIds(combined.filter((task) => diffDays(task.deadline, target) > 0).map((t) => t.id))
     }
   }
 
   const createMilestone = async (rawName) => {
     const name = rawName.trim()
-    if (!name || !supabase || !currentUserId || !resolvedSelectedProjectId) return
+    if (!name || !apiConnected || !currentUserId || !resolvedSelectedProjectId) return
     try {
       const id = await createMilestoneRemote(supabase, resolvedSelectedProjectId, name, currentUserId)
       await refresh()
@@ -2657,7 +2998,7 @@ function App() {
   const renameMilestone = (milestoneId, name) => {
     const trimmed = name.trim()
     if (!trimmed || milestoneId === ungroupedMilestoneId) return
-    if (!supabase || !dataEnabled) return
+    if (!apiConnected || !dataEnabled) return
     void (async () => {
       try {
         await updateMilestoneTitleRemote(supabase, milestoneId, trimmed)
@@ -2672,7 +3013,7 @@ function App() {
   const deleteMilestone = (milestoneId) => {
     if (milestoneId === ungroupedMilestoneId) return
     if (!window.confirm('Удалить веху? Задачи перейдут в «Без вехи».')) return
-    if (!supabase || !dataEnabled) return
+    if (!apiConnected || !dataEnabled) return
     void (async () => {
       try {
         await deleteMilestoneRemote(supabase, milestoneId)
@@ -2699,10 +3040,17 @@ function App() {
     const active = tasks.filter((t) => t.status !== 'Готово')
     if (active.length === 0) return
     const ids = active.map((t) => t.id)
-    if (!supabase || !currentUserId || !dataEnabled) return
+    const withChildren = new Set(ids)
+    selectedProject?.tasks.forEach((t) => {
+      if (t.parentTaskId && withChildren.has(t.parentTaskId) && t.status !== 'Готово') {
+        withChildren.add(t.id)
+      }
+    })
+    const allIds = [...withChildren]
+    if (!apiConnected || !currentUserId || !dataEnabled) return
     void (async () => {
       try {
-        await updateTasksStatusBulkRemote(supabase, currentUserId, ids, 'Готово')
+        await updateTasksStatusBulkRemote(supabase, currentUserId, allIds, 'Готово')
         await refresh()
         setMilestoneMenuOpenId(null)
       } catch (e) {
@@ -2749,30 +3097,68 @@ function App() {
   }
 
   if (!configured) {
+    const prodHint = import.meta.env.PROD
     return (
       <div className="auth-screen">
         <div className="auth-panel">
           <h1 className="heading-h1 auth-panel__title">Нужен Supabase</h1>
-          <p className="auth-panel__lede">
-            В корне проекта нет переменных <code className="auth-inline-code">VITE_SUPABASE_*</code>. Без них клиент не
-            подключается к бэкенду.
-          </p>
-          <ol className="auth-steps">
-            <li>
-              Скопируйте <code className="auth-inline-code">.env.example</code> → <code className="auth-inline-code">.env</code>
-            </li>
-            <li>
-              Вставьте URL и anon key из Supabase: Settings → API
-            </li>
-            <li>
-              Остановите сервер и снова запустите <code className="auth-inline-code">npm run dev</code> (Vite читает .env
-              только при старте)
-            </li>
-          </ol>
-          <p className="auth-panel__hint muted">
-            Если открываете не dev-сервер, а старый <code className="auth-inline-code">dist</code> или другую папку —
-            изменений в коде не будет. Внизу справа должна быть метка «DEV · Vite».
-          </p>
+          {prodHint ? (
+            <>
+              <p className="auth-panel__lede">
+                В этой <strong>сборке</strong> не подставлены{' '}
+                <code className="auth-inline-code">VITE_SUPABASE_URL</code> и{' '}
+                <code className="auth-inline-code">VITE_SUPABASE_ANON_KEY</code>. Для Vite они задаются{' '}
+                <strong>при сборке</strong> — только файл <code className="auth-inline-code">.env</code> на сервере не
+                читается, нужны переменные в хостинге.
+              </p>
+              <ol className="auth-steps">
+                <li>
+                  <strong>Vercel</strong> → ваш проект → <strong>Settings</strong> →{' '}
+                  <strong>Environment Variables</strong>
+                </li>
+                <li>
+                  Добавьте <code className="auth-inline-code">VITE_SUPABASE_URL</code> (Project URL) и{' '}
+                  <code className="auth-inline-code">VITE_SUPABASE_ANON_KEY</code> (anon public) из Supabase →{' '}
+                  <strong>Settings → API</strong>. Имена переменных — без опечаток, без лишних пробелов.
+                </li>
+                <li>
+                  Включите окружение <strong>Production</strong> (и <strong>Preview</strong>, если смотрите превью-деплой).
+                </li>
+                <li>
+                  <strong>Deployments</strong> → последний деплой → <strong>⋯</strong> → <strong>Redeploy</strong> (новая
+                  сборка подтянет переменные).
+                </li>
+              </ol>
+              <p className="auth-panel__hint muted">
+                Если переменные добавили, но экран не исчез: чаще всего не сделали Redeploy или имя переменной отличается от{' '}
+                <code className="auth-inline-code">VITE_…</code>.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="auth-panel__lede">
+                В корне проекта нет переменных <code className="auth-inline-code">VITE_SUPABASE_*</code>. Без них клиент не
+                подключается к бэкенду.
+              </p>
+              <ol className="auth-steps">
+                <li>
+                  Скопируйте <code className="auth-inline-code">.env.example</code> →{' '}
+                  <code className="auth-inline-code">.env</code>
+                </li>
+                <li>
+                  Вставьте URL и anon key из Supabase: Settings → API
+                </li>
+                <li>
+                  Остановите сервер и снова запустите <code className="auth-inline-code">npm run dev</code> (Vite читает
+                  .env только при старте)
+                </li>
+              </ol>
+              <p className="auth-panel__hint muted">
+                Если открываете не dev-сервер, а старый <code className="auth-inline-code">dist</code> или другую папку —
+                изменений в коде не будет. Внизу справа должна быть метка «DEV · Vite».
+              </p>
+            </>
+          )}
         </div>
       </div>
     )
@@ -2787,7 +3173,7 @@ function App() {
   }
 
   if (!session) {
-    return <LoginScreen onSignIn={signIn} loading={authLoading} />
+    return <LoginScreen onSignIn={signIn} loading={authLoading} devLoginAny={devLoginAny} />
   }
 
   if (profileLoading) {
@@ -2866,63 +3252,149 @@ function App() {
       </header>
 
       <nav className="project-tabs" aria-label="Проекты">
-        <div className="section-header project-tabs__header">
-          <h2 className="heading-h2">Проекты</h2>
-          <div className="project-tabs__actions">
-            {resolvedSelectedProjectId ? (
+        <section className="project-workspace" aria-label="Темы и проекты">
+          <div className="section-header project-tabs__header">
+            <h2 className="heading-h2">Темы</h2>
+            <div className="project-tabs__actions">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  setShowNewTopicModal(true)
+                }}
+              >
+                + Новая тема
+              </button>
+              <button type="button" className="btn-secondary" onClick={openEditTopicModal}>
+                Изменить тему
+              </button>
+            </div>
+          </div>
+          <div className="project-workspace__filters">
+            <div className="topic-toggle-row" role="tablist" aria-label="Быстрые группы тем">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={selectedTopicFilter === 'all'}
+                className={`topic-toggle-btn ${selectedTopicFilter === 'all' ? 'topic-toggle-btn--active' : ''}`}
+                onClick={() => {
+                  setSelectedTopicFilter('all')
+                  setOpenedTaskId(null)
+                }}
+              >
+                Все темы
+                <span className="topic-toggle-btn__count">{topicProjectCounts.all}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={selectedTopicFilter === 'none'}
+                className={`topic-toggle-btn ${selectedTopicFilter === 'none' ? 'topic-toggle-btn--active' : ''}`}
+                onClick={() => {
+                  setSelectedTopicFilter('none')
+                  setOpenedTaskId(null)
+                }}
+              >
+                Без темы
+                <span className="topic-toggle-btn__count">{topicProjectCounts.none}</span>
+              </button>
+            </div>
+            <div className="topic-chip-row" role="tablist" aria-label="Темы">
+              {topics.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedTopicFilter === t.id}
+                  className={`topic-chip ${selectedTopicFilter === t.id ? 'topic-chip--active' : ''}`}
+                  onClick={() => {
+                    setSelectedTopicFilter(t.id)
+                    setOpenedTaskId(null)
+                  }}
+                >
+                  {t.name}
+                  <span className="topic-chip__count">{topicProjectCounts.byId.get(t.id) ?? 0}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="section-header project-tabs__header project-workspace__projects-head">
+            <h2 className="heading-h2">Проекты</h2>
+            <div className="project-tabs__actions">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  setNewProjectTopicId(selectedTopicFilter === 'all' || selectedTopicFilter === 'none' ? null : selectedTopicFilter)
+                  setShowNewProjectModal(true)
+                }}
+              >
+                <span className="btn-primary__icon" aria-hidden>
+                  +
+                </span>
+                Новый проект
+              </button>
               <button
                 type="button"
                 className="btn-secondary"
+                disabled={!resolvedSelectedProjectId}
                 onClick={() => {
                   const p = projects.find((x) => x.id === resolvedSelectedProjectId)
-                  setRenameProjectDraft(p?.name ?? '')
+                  if (!p) return
+                  setRenameProjectDraft(p.name ?? '')
+                  setRenameProjectTopicId(p.topicId ?? null)
                   setShowRenameProjectModal(true)
                 }}
               >
-                Изменить
+                Изменить проект
               </button>
-            ) : null}
-            <button type="button" className="btn-primary" onClick={() => setShowNewProjectModal(true)}>
-              <span className="btn-primary__icon" aria-hidden>
-                +
-              </span>
-              Новый проект
-            </button>
+            </div>
           </div>
-        </div>
-        <div className="project-tabs__list">
-          {primaryTabs.map((project) => (
-            <button
-              key={project.id}
-              type="button"
-              role="tab"
-              aria-selected={resolvedSelectedProjectId === project.id}
-              className={`project-tab ${resolvedSelectedProjectId === project.id ? 'project-tab--active' : ''}`}
-              onClick={() => switchProject(project.id)}
-            >
-              <span className="project-tab__label">{project.name}</span>
-              <span className="project-tab__count">({countTasksForProject(project)})</span>
-            </button>
-          ))}
-          {overflowTabs.length > 0 && (
-            <details className="project-tabs__overflow">
-              <summary className="project-tab project-tab--overflow">ещё {overflowTabs.length}</summary>
-              <div className="project-tabs__overflow-menu">
-                {overflowTabs.map((project) => (
-                  <button
-                    key={project.id}
-                    type="button"
-                    className="project-tabs__overflow-item"
-                    onClick={() => switchProject(project.id)}
-                  >
-                    {project.name}{' '}
-                    <span className="project-tab__count">({countTasksForProject(project)})</span>
-                  </button>
-                ))}
-              </div>
-            </details>
+          <div className="project-tabs__context muted" role="status" aria-live="polite">
+            {selectedTopicFilter === 'all' ? (
+              <>
+                Показываем <strong>все темы</strong>. Проекты сгруппированы по темам.
+              </>
+            ) : (
+              <>
+                Выбрана тема: <strong>{selectedTopicLabel}</strong>. Проектов в теме: {visibleProjects.length}
+              </>
+            )}
+          </div>
+          {groupedVisibleProjects.length > 0 ? (
+            <div className="project-groups">
+              {groupedVisibleProjects.map((group) => (
+                <section key={group.key} className="project-group" aria-label={`Группа проектов ${group.label}`}>
+                  <header className="project-group__head">
+                    <h3 className="project-group__title">{group.label}</h3>
+                    <span className="project-group__count">{group.projects.length}</span>
+                  </header>
+                  <div className="project-cluster-grid" role="tablist" aria-label={`Проекты группы ${group.label}`}>
+                    {group.projects.map((project) => {
+                      const taskCount = countTasksForProject(project)
+                      return (
+                        <button
+                          key={project.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={resolvedSelectedProjectId === project.id}
+                          className={`project-cluster-card ${resolvedSelectedProjectId === project.id ? 'project-cluster-card--active' : ''}`}
+                          onClick={() => switchProject(project.id)}
+                        >
+                          <span className="project-cluster-card__title">{project.name}</span>
+                          <span className="project-cluster-card__meta">Задач: {taskCount}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div className="project-cluster-empty">В выбранной группе пока нет проектов. Создай первый проект.</div>
           )}
-        </div>
+        </section>
       </nav>
 
       {selectedProject && (
@@ -3085,10 +3557,27 @@ function App() {
           {milestonesToRender.map((milestone) => {
             const tasks = tasksByMilestone[milestone.id] ?? []
             const activeTasks = tasks.filter((t) => t.status !== 'Готово')
-            const completedTasks = tasks.filter((t) => t.status === 'Готово')
+            const completedRoots = tasks.filter((t) => t.status === 'Готово')
+            const completedSubtasksInMilestone = selectedProject.tasks.filter(
+              (t) =>
+                t.parentTaskId &&
+                t.status === 'Готово' &&
+                (t.milestoneId ?? ungroupedMilestoneId) === milestone.id,
+            )
+            const completedTasks = [...completedRoots, ...completedSubtasksInMilestone].sort(
+              (a, b) => toDate(a.deadline) - toDate(b.deadline),
+            )
+            const milestoneFilterKey = `${resolvedSelectedProjectId}:${milestone.id}`
+            const assigneeFilterValue = milestoneAssigneeFilters[milestoneFilterKey] ?? 'all'
+            const visibleActiveTasks = activeTasks.filter((t) =>
+              matchesMilestoneAssigneeFilter(t, assigneeFilterValue),
+            )
+            const visibleCompletedTasks = completedTasks.filter((t) =>
+              matchesMilestoneAssigneeFilter(t, assigneeFilterValue),
+            )
             const expanded = expandedMilestoneIdsResolved.includes(milestone.id)
             const deadline = milestoneDeadline(milestone.id)
-            const overdueInMilestone = activeTasks.filter(
+            const overdueInMilestone = visibleActiveTasks.filter(
               (t) => getDeadlineLabel(t.deadline) === 'overdue',
             ).length
             const deadlinePillKind = (() => {
@@ -3100,7 +3589,8 @@ function App() {
               return 'neutral'
             })()
             const allSelected =
-              activeTasks.length > 0 && activeTasks.every((t) => selectedTaskIds.includes(t.id))
+              visibleActiveTasks.length > 0 &&
+              visibleActiveTasks.every((t) => selectedTaskIds.includes(t.id))
             const completedKey = `${resolvedSelectedProjectId}:${milestone.id}`
             const completedOpen = Boolean(expandedCompletedSections[completedKey])
             const isUngrouped = milestone.id === ungroupedMilestoneId
@@ -3292,7 +3782,7 @@ function App() {
                                     mode: prev[milestone.id]?.mode ?? 'shift',
                                   },
                                 }))
-                                if (!isUngrouped && supabase && dataEnabled) {
+                                if (!isUngrouped && apiConnected && dataEnabled) {
                                   void (async () => {
                                     try {
                                       await updateMilestoneDeadlineRemote(
@@ -3335,13 +3825,33 @@ function App() {
                     {deadline ? `📅 ${formatDate(deadline)}` : '📅 Нет дат'}
                   </span>
                   <span className="milestone-meta-pill milestone-meta-pill--count">
-                    {ruTasksCountLabel(activeTasks.length)}
+                    {ruTasksCountLabel(visibleActiveTasks.length)}
                   </span>
                   {overdueInMilestone > 0 && (
                     <span className="milestone-meta-pill milestone-meta-pill--overdue-tasks">
                       {overdueInMilestone} просрочено
                     </span>
                   )}
+                  <label className="milestone-assignee-filter" onClick={(e) => e.stopPropagation()}>
+                    <span>Исполнитель</span>
+                    <select
+                      value={assigneeFilterValue}
+                      onChange={(e) =>
+                        setMilestoneAssigneeFilters((prev) => ({
+                          ...prev,
+                          [milestoneFilterKey]: e.target.value,
+                        }))
+                      }
+                    >
+                      <option value="all">Все</option>
+                      <option value="none">Без исполнителя</option>
+                      {users.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
 
                 {expanded && (
@@ -3363,23 +3873,26 @@ function App() {
                     <thead>
                       <tr>
                         <th scope="col" className="issues-table__th issues-table__th--check">
-                          <div className="issues-table__check-cell issues-table__check-cell--head">
+                          <div className="issues-table__check-cell issues-table__check-cell--tile issues-table__check-cell--head">
                             <span className="task-row__drag-head-spacer" aria-hidden />
+                            <span className="issues-table__check-cell__tile-slot" aria-hidden />
                             <input
                               type="checkbox"
+                              className="issues-table__check-cell__cb-input"
                               checked={allSelected}
                               onChange={() => {
                                 if (allSelected) {
-                                  const ids = new Set(activeTasks.map((t) => t.id))
+                                  const ids = new Set(visibleActiveTasks.map((t) => t.id))
                                   setSelectedTaskIds((prev) => prev.filter((id) => !ids.has(id)))
                                   return
                                 }
                                 setSelectedTaskIds((prev) => [
-                                  ...new Set([...prev, ...activeTasks.map((t) => t.id)]),
+                                  ...new Set([...prev, ...visibleActiveTasks.map((t) => t.id)]),
                                 ])
                               }}
                               aria-label="Выбрать все активные задачи вехи"
                             />
+                            <span className="issues-table__check-cell__tile-slot" aria-hidden />
                           </div>
                         </th>
                         <th scope="col" className="issues-table__th issues-table__th--title">
@@ -3406,140 +3919,308 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {activeTasks.length === 0 ? (
+                      {visibleActiveTasks.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="issues-table__empty">
-                            Нет активных задач
+                            {assigneeFilterValue === 'all'
+                              ? 'Нет активных задач'
+                              : 'Нет активных задач по выбранному исполнителю'}
                           </td>
                         </tr>
                       ) : (
-                      activeTasks.map((task) => {
+                      visibleActiveTasks.map((task) => {
                         const label = getDeadlineLabel(task.deadline)
                         const isViolation = visibleViolatingTaskIds.includes(task.id)
                         const isSelected = selectedTaskIds.includes(task.id)
-                        const depCandidates = selectedProject.tasks.filter((c) => c.id !== task.id)
+                        const depCandidates = selectedProject.tasks.filter(
+                          (c) => c.id !== task.id && !c.parentTaskId,
+                        )
+                        const subRows = (subtasksByParentId[task.id] ?? []).filter(
+                          (st) => st.status !== 'Готово' && matchesMilestoneAssigneeFilter(st, assigneeFilterValue),
+                        )
+                        const activeSubtaskCount = subRows.length
+                        const subExpanded = expandedSubtaskParents.has(task.id)
                         return (
-                          <tr
-                            key={task.id}
-                            className={`issues-table__task-row task-row--urgency-${label} ${isViolation ? 'row-violation' : ''} ${isSelected ? 'task-row--selected' : ''} ${draggingTaskId === task.id ? 'issues-table__task-row--dragging' : ''}`}
-                            onClick={(e) => {
-                              if (e.target.closest('input, select, button, a, .task-inline, .task-row__drag-handle')) return
-                              setOpenedTaskId(task.id)
-                            }}
-                          >
-                            <td className="issues-table__td issues-table__td--check">
-                              <div className="issues-table__check-cell">
-                                <button
-                                  type="button"
-                                  className="task-row__drag-handle"
-                                  aria-label="Переместить задачу в другую веху"
-                                  title="Переместить в другую веху"
-                                  draggable
-                                  onMouseDown={(e) => e.stopPropagation()}
-                                  onClick={(e) => e.stopPropagation()}
-                                  onDragStart={(e) => {
-                                    e.stopPropagation()
-                                    if (moveTaskToMilestoneLockRef.current) {
-                                      e.preventDefault()
-                                      return
+                          <Fragment key={task.id}>
+                            <tr
+                              className={`issues-table__task-row task-row--urgency-${label} ${isViolation ? 'row-violation' : ''} ${isSelected ? 'task-row--selected' : ''} ${draggingTaskId === task.id ? 'issues-table__task-row--dragging' : ''}`}
+                              onClick={(e) => {
+                                if (
+                                  e.target.closest(
+                                    'input, select, button, a, .task-inline, .task-row__drag-handle, .subtask-expand-btn, .quick-add-card, .quick-add-trigger',
+                                  )
+                                )
+                                  return
+                                setOpenedTaskId(task.id)
+                              }}
+                            >
+                              <td className="issues-table__td issues-table__td--check issues-table__td--check-root">
+                                <div className="issues-table__check-cell issues-table__check-cell--tile issues-table__check-cell--tile-root">
+                                  <button
+                                    type="button"
+                                    className="task-row__drag-handle"
+                                    aria-label="Переместить задачу в другую веху"
+                                    title="Переместить в другую веху"
+                                    draggable
+                                    onMouseDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onDragStart={(e) => {
+                                      e.stopPropagation()
+                                      if (moveTaskToMilestoneLockRef.current) {
+                                        e.preventDefault()
+                                        return
+                                      }
+                                      if (task.status === 'Готово') {
+                                        e.preventDefault()
+                                        setTaskMoveNotice({
+                                          variant: 'error',
+                                          text: 'Сначала верните задачу в активные',
+                                        })
+                                        return
+                                      }
+                                      e.dataTransfer.setData('application/task-id', task.id)
+                                      e.dataTransfer.setData('text/plain', task.id)
+                                      e.dataTransfer.effectAllowed = 'move'
+                                      setDraggingTaskId(task.id)
+                                      setDragSourceMilestoneKey(milestone.id)
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggingTaskId(null)
+                                      setDragSourceMilestoneKey(null)
+                                      setDragOverMilestoneKey(null)
+                                    }}
+                                  >
+                                    <span className="task-row__drag-grip" aria-hidden>
+                                      ⋮⋮
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="subtask-expand-btn"
+                                    aria-expanded={subExpanded}
+                                    aria-label={
+                                      subExpanded ? 'Свернуть подзадачи' : 'Показать подзадачи'
                                     }
-                                    if (task.status === 'Готово') {
-                                      e.preventDefault()
-                                      setTaskMoveNotice({
-                                        variant: 'error',
-                                        text: 'Сначала верните задачу в активные',
-                                      })
-                                      return
+                                    title={
+                                      subExpanded
+                                        ? 'Свернуть подзадачи'
+                                        : activeSubtaskCount > 0
+                                          ? `Подзадачи (${activeSubtaskCount})`
+                                          : 'Добавить подзадачу'
                                     }
-                                    e.dataTransfer.setData('application/task-id', task.id)
-                                    e.dataTransfer.setData('text/plain', task.id)
-                                    e.dataTransfer.effectAllowed = 'move'
-                                    setDraggingTaskId(task.id)
-                                    setDragSourceMilestoneKey(milestone.id)
-                                  }}
-                                  onDragEnd={() => {
-                                    setDraggingTaskId(null)
-                                    setDragSourceMilestoneKey(null)
-                                    setDragOverMilestoneKey(null)
-                                  }}
-                                >
-                                  <span className="task-row__drag-grip" aria-hidden>
-                                    ⋮⋮
-                                  </span>
-                                </button>
-                                <input
-                                  type="checkbox"
-                                  checked={selectedTaskIds.includes(task.id)}
-                                  onChange={() => toggleTaskSelection(task.id)}
-                                />
-                              </div>
-                            </td>
-                            <td className="issues-table__td issues-table__td--title">
-                              <div className="task-title-cell">
-                                <span className="task-title-cell__title">{task.title}</span>
-                                <TaskDependencyPanel task={task} tasks={selectedProject.tasks} />
-                              </div>
-                            </td>
-                            <td className="issues-table__td issues-table__td--center">
-                              <div className="status-cell status-cell--inline">
-                                <InlineTaskStatus
-                                  taskId={task.id}
-                                  status={task.status}
-                                  statusOptions={statusOptions}
-                                  updateTask={updateTask}
-                                  urgency={label}
-                                />
-                              </div>
-                            </td>
-                            <td className="issues-table__td issues-table__td--center">
-                              <div className="assignee-cell assignee-cell--inline">
-                                <InlineTaskAssignee
-                                  taskId={task.id}
-                                  task={task}
-                                  users={users}
-                                  updateTask={updateTask}
-                                />
-                              </div>
-                            </td>
-                            <td className="issues-table__td issues-table__td--center">
-                              <InlineTaskDateField
-                                taskId={task.id}
-                                field="startDate"
-                                value={task.startDate}
-                                updateTask={updateTask}
-                              />
-                            </td>
-                            <td className="issues-table__td issues-table__td--center">
-                              <div className="due-cell due-cell--inline">
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      toggleSubtaskExpand(task.id)
+                                    }}
+                                  >
+                                    <span className="subtask-expand-btn__icon" aria-hidden>
+                                      {subExpanded ? '−' : '+'}
+                                    </span>
+                                    {activeSubtaskCount > 0 ? (
+                                      <span className="subtask-expand-btn__badge">{activeSubtaskCount}</span>
+                                    ) : null}
+                                  </button>
+                                  <input
+                                    type="checkbox"
+                                    className="issues-table__check-cell__cb-input"
+                                    checked={selectedTaskIds.includes(task.id)}
+                                    onChange={() => toggleTaskSelection(task.id)}
+                                  />
+                                  <span className="issues-table__check-cell__tile-slot" aria-hidden />
+                                </div>
+                              </td>
+                              <td className="issues-table__td issues-table__td--title">
+                                <div className="task-title-cell">
+                                  <span className="task-title-cell__title">{task.title}</span>
+                                  <TaskDependencyPanel task={task} tasks={selectedProject.tasks} />
+                                </div>
+                              </td>
+                              <td className="issues-table__td issues-table__td--center">
+                                <div className="status-cell status-cell--inline">
+                                  <InlineTaskStatus
+                                    taskId={task.id}
+                                    status={task.status}
+                                    statusOptions={statusOptions}
+                                    updateTask={updateTask}
+                                    urgency={label}
+                                  />
+                                </div>
+                              </td>
+                              <td className="issues-table__td issues-table__td--center">
+                                <div className="assignee-cell assignee-cell--inline">
+                                  <InlineTaskAssignee
+                                    taskId={task.id}
+                                    task={task}
+                                    users={users}
+                                    updateTask={updateTask}
+                                  />
+                                </div>
+                              </td>
+                              <td className="issues-table__td issues-table__td--center">
                                 <InlineTaskDateField
                                   taskId={task.id}
-                                  field="deadline"
-                                  value={task.deadline}
+                                  field="startDate"
+                                  value={task.startDate}
                                   updateTask={updateTask}
-                                  deadlineLabel={label}
                                 />
-                              </div>
-                            </td>
-                            <td className="issues-table__td issues-table__td--center">
-                              <InlineTaskPriority taskId={task.id} priority={task.priority} updateTask={updateTask} />
-                            </td>
-                            <td className="issues-table__td issues-table__td--center">
-                              <InlineTaskDependency
-                                taskId={task.id}
-                                dependsOnTaskId={task.dependsOnTaskId}
-                                candidates={depCandidates}
-                                tasks={selectedProject.tasks}
-                                updateTask={updateTask}
-                              />
-                            </td>
-                          </tr>
+                              </td>
+                              <td className="issues-table__td issues-table__td--center">
+                                <div className="due-cell due-cell--inline">
+                                  <InlineTaskDateField
+                                    taskId={task.id}
+                                    field="deadline"
+                                    value={task.deadline}
+                                    updateTask={updateTask}
+                                    deadlineLabel={label}
+                                  />
+                                </div>
+                              </td>
+                              <td className="issues-table__td issues-table__td--center">
+                                <InlineTaskPriority taskId={task.id} priority={task.priority} updateTask={updateTask} />
+                              </td>
+                              <td className="issues-table__td issues-table__td--center">
+                                <InlineTaskDependency
+                                  taskId={task.id}
+                                  dependsOnTaskId={task.dependsOnTaskId}
+                                  candidates={depCandidates}
+                                  tasks={selectedProject.tasks}
+                                  updateTask={updateTask}
+                                />
+                              </td>
+                            </tr>
+                            {subExpanded &&
+                              subRows.map((st) => {
+                                const stLabel = getDeadlineLabel(st.deadline)
+                                const stViolation = visibleViolatingTaskIds.includes(st.id)
+                                const stSelected = selectedTaskIds.includes(st.id)
+                                const stDep = selectedProject.tasks.filter(
+                                  (c) => c.id !== st.id && !c.parentTaskId,
+                                )
+                                const stDone = st.status === 'Готово'
+                                return (
+                                  <tr
+                                    key={st.id}
+                                    className={`issues-table__task-row issues-table__task-row--subtask issues-table__task-row--subtask-nested task-row--urgency-${stLabel} ${stViolation ? 'row-violation' : ''} ${stSelected ? 'task-row--selected' : ''} ${stDone ? 'issues-table__task-row--subtask-done' : ''}`}
+                                    onClick={(e) => {
+                                      if (e.target.closest('input, select, button, a, .task-inline')) return
+                                      setOpenedTaskId(st.id)
+                                    }}
+                                  >
+                                    <td className="issues-table__td issues-table__td--check issues-table__td--check-root">
+                                      <div className="issues-table__check-cell issues-table__check-cell--tile issues-table__check-cell--tile-subtask">
+                                        <span
+                                          className="task-row__drag-placeholder"
+                                          title="Подзадачи между вехами не переносятся"
+                                          aria-hidden
+                                        >
+                                          ··
+                                        </span>
+                                        <span className="issues-table__check-cell__tile-slot" aria-hidden />
+                                        <input
+                                          type="checkbox"
+                                          className="issues-table__check-cell__cb-input"
+                                          checked={selectedTaskIds.includes(st.id)}
+                                          onChange={() => toggleTaskSelection(st.id)}
+                                        />
+                                        <span className="issues-table__check-cell__tile-slot" aria-hidden />
+                                      </div>
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--title">
+                                      <div className="task-title-cell task-title-cell--subtask">
+                                        <span className="task-title-cell__title">{st.title}</span>
+                                        <TaskDependencyPanel task={st} tasks={selectedProject.tasks} />
+                                      </div>
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--center">
+                                      <div className="status-cell status-cell--inline">
+                                        <InlineTaskStatus
+                                          taskId={st.id}
+                                          status={st.status}
+                                          statusOptions={statusOptions}
+                                          updateTask={updateTask}
+                                          urgency={stLabel}
+                                        />
+                                      </div>
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--center">
+                                      <div className="assignee-cell assignee-cell--inline">
+                                        <InlineTaskAssignee
+                                          taskId={st.id}
+                                          task={st}
+                                          users={users}
+                                          updateTask={updateTask}
+                                        />
+                                      </div>
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--center">
+                                      <InlineTaskDateField
+                                        taskId={st.id}
+                                        field="startDate"
+                                        value={st.startDate}
+                                        updateTask={updateTask}
+                                      />
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--center">
+                                      <div className="due-cell due-cell--inline">
+                                        <InlineTaskDateField
+                                          taskId={st.id}
+                                          field="deadline"
+                                          value={st.deadline}
+                                          updateTask={updateTask}
+                                          deadlineLabel={stLabel}
+                                        />
+                                      </div>
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--center">
+                                      <InlineTaskPriority taskId={st.id} priority={st.priority} updateTask={updateTask} />
+                                    </td>
+                                    <td className="issues-table__td issues-table__td--center">
+                                      <InlineTaskDependency
+                                        taskId={st.id}
+                                        dependsOnTaskId={st.dependsOnTaskId}
+                                        candidates={stDep}
+                                        tasks={selectedProject.tasks}
+                                        updateTask={updateTask}
+                                      />
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            {subExpanded && (
+                              <tr
+                                key={`${task.id}-subform`}
+                                className="issues-table__task-row issues-table__task-row--subtask-form issues-table__task-row--subtask-nested"
+                              >
+                                <td colSpan={8} className="issues-table__td issues-table__td--subtask-quickadd">
+                                  <div
+                                    className="milestone-subtask-quickadd"
+                                    onClick={(e) => e.stopPropagation()}
+                                    onKeyDown={(e) => e.stopPropagation()}
+                                  >
+                                    <QuickAddTask
+                                      key={`subtask-qa-${task.id}-${milestone.id}`}
+                                      projectTasks={selectedProject.tasks.filter((t) => !t.parentTaskId)}
+                                      todayDateString={todayDateString}
+                                      assigneeUsers={users}
+                                      onCreate={(payload) => createSubtaskFromQuickAdd(task.id, payload)}
+                                      initialCollapsed={false}
+                                      addButtonLabel="Добавить подзадачу"
+                                      titlePlaceholder="Добавить подзадачу…"
+                                      submitButtonLabel="Создать"
+                                      ariaLabelParams="Параметры подзадачи"
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
                         )
                       })
                       )}
                     </tbody>
                   </table>
 
-                  {completedTasks.length > 0 && (
+                  {visibleCompletedTasks.length > 0 && (
                     <div className="milestone-completed">
                       <button
                         type="button"
@@ -3550,15 +4231,18 @@ function App() {
                         <span className="milestone-completed__toggle-icon" aria-hidden>
                           ✔
                         </span>
-                        Завершённые ({completedTasks.length}){' '}
+                        Завершённые ({visibleCompletedTasks.length}){' '}
                         <span className="milestone-completed__caret" aria-hidden>
                           {completedOpen ? '▲' : '▼'}
                         </span>
                       </button>
                       {completedOpen && (
                         <ul className="milestone-completed__list">
-                          {completedTasks.map((t) => (
-                            <li key={t.id} className="milestone-completed__item">
+                          {visibleCompletedTasks.map((t) => (
+                            <li
+                              key={t.id}
+                              className={`milestone-completed__item${t.parentTaskId ? ' milestone-completed__item--subtask' : ''}`}
+                            >
                               <span className="milestone-completed__check" aria-hidden>
                                 ✔
                               </span>
@@ -3618,7 +4302,11 @@ function App() {
                                       {t.title}
                                     </button>
                                     <span className="milestone-completed__meta">
-                                      {t.assignee ? `👤 ${t.assignee}` : '👤 Не назначен'} · 📅 {formatDate(t.deadline)}
+                                      {t.parentTaskId
+                                        ? `К задаче: ${selectedProject.tasks.find((x) => x.id === t.parentTaskId)?.title ?? '—'} · `
+                                        : ''}
+                                      {t.assignee ? `👤 ${t.assignee}` : '👤 Не назначен'} · 📅{' '}
+                                      {formatDate(t.deadline)}
                                     </span>
                                   </span>
                                   <div className="milestone-completed__actions">
@@ -3719,10 +4407,19 @@ function App() {
         </>
       )}
         </div>
-      ) : projects.length === 0 ? (
+      ) : visibleProjects.length === 0 ? (
         <div className="empty-projects">
-          <p className="muted">Нет проектов</p>
-          <button type="button" className="btn-primary empty-projects__btn" onClick={() => setShowNewProjectModal(true)}>
+          <p className="muted">
+            {projects.length === 0 ? 'Нет проектов' : 'В этой теме пока нет проектов'}
+          </p>
+          <button
+            type="button"
+            className="btn-primary empty-projects__btn"
+            onClick={() => {
+              setNewProjectTopicId(selectedTopicFilter === 'all' || selectedTopicFilter === 'none' ? null : selectedTopicFilter)
+              setShowNewProjectModal(true)
+            }}
+          >
             <span className="btn-primary__icon" aria-hidden>
               +
             </span>
@@ -3739,17 +4436,75 @@ function App() {
           assigneeUsers={users}
           currentUser={currentUser}
           supabase={supabase}
+          apiConnected={apiConnected}
           onUpdateTask={updateTask}
           onDeleteTask={deleteTaskById}
           onClose={() => setOpenedTaskId(null)}
           refresh={refresh}
         />
       )}
+      {showNewTopicModal && (
+        <div
+          className="project-modal-backdrop"
+          role="presentation"
+          onClick={() => {
+            setShowNewTopicModal(false)
+            setNewTopicDraft('')
+          }}
+        >
+          <div
+            className="project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-topic-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="new-topic-title" className="heading-h3">
+              Новая тема
+            </h3>
+            <label className="project-modal__field">
+              <span>Название</span>
+              <input
+                value={newTopicDraft}
+                onChange={(e) => setNewTopicDraft(e.target.value)}
+                placeholder="Название темы"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void createTopicFromModal()
+                }}
+              />
+            </label>
+            <div className="project-modal__actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setShowNewTopicModal(false)
+                  setNewTopicDraft('')
+                }}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void createTopicFromModal()}
+                disabled={!newTopicDraft.trim()}
+              >
+                Создать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showNewProjectModal && (
         <div
           className="project-modal-backdrop"
           role="presentation"
-          onClick={() => setShowNewProjectModal(false)}
+          onClick={() => {
+            setShowNewProjectModal(false)
+            setNewProjectTopicId(null)
+          }}
         >
           <div
             className="project-modal"
@@ -3773,8 +4528,30 @@ function App() {
                 }}
               />
             </label>
+            <label className="project-modal__field">
+              <span>Тема</span>
+              <select
+                className="project-modal__select"
+                value={newProjectTopicId ?? ''}
+                onChange={(e) => setNewProjectTopicId(e.target.value || null)}
+              >
+                <option value="">Без темы</option>
+                {topics.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="project-modal__actions">
-              <button type="button" className="btn-secondary" onClick={() => setShowNewProjectModal(false)}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setShowNewProjectModal(false)
+                  setNewProjectTopicId(null)
+                }}
+              >
                 Отмена
               </button>
               <button
@@ -3794,7 +4571,10 @@ function App() {
         <div
           className="project-modal-backdrop"
           role="presentation"
-          onClick={() => setShowRenameProjectModal(false)}
+          onClick={() => {
+            setShowRenameProjectModal(false)
+            setRenameProjectTopicId(null)
+          }}
         >
           <div
             className="project-modal"
@@ -3804,7 +4584,7 @@ function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <h3 id="rename-project-title" className="heading-h3">
-              Переименовать проект
+              Изменить проект
             </h3>
             <label className="project-modal__field">
               <span>Название</span>
@@ -3818,17 +4598,114 @@ function App() {
                 }}
               />
             </label>
-            <div className="project-modal__actions">
-              <button type="button" className="btn-secondary" onClick={() => setShowRenameProjectModal(false)}>
-                Отмена
-              </button>
+            <label className="project-modal__field">
+              <span>Тема</span>
+              <select
+                className="project-modal__select"
+                value={renameProjectTopicId ?? ''}
+                onChange={(e) => setRenameProjectTopicId(e.target.value || null)}
+              >
+                <option value="">Без темы</option>
+                {topics.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="project-modal__actions project-modal__actions--stack">
+              <div className="project-modal__actions-right">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setShowRenameProjectModal(false)
+                    setRenameProjectTopicId(null)
+                  }}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={renameProject}
+                  disabled={!renameProjectDraft.trim()}
+                >
+                  Сохранить
+                </button>
+              </div>
               <button
                 type="button"
-                className="btn-primary"
-                onClick={renameProject}
-                disabled={!renameProjectDraft.trim()}
+                className="btn-secondary project-modal__delete"
+                onClick={() => void removeProject()}
               >
-                Сохранить
+                Удалить проект
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEditTopicModal && (
+        <div
+          className="project-modal-backdrop"
+          role="presentation"
+          onClick={() => {
+            setShowEditTopicModal(false)
+            setEditTopicId(null)
+            setEditTopicDraft('')
+          }}
+        >
+          <div
+            className="project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-topic-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="edit-topic-title" className="heading-h3">
+              Изменить тему
+            </h3>
+            <label className="project-modal__field">
+              <span>Название темы</span>
+              <input
+                value={editTopicDraft}
+                onChange={(e) => setEditTopicDraft(e.target.value)}
+                placeholder="Название темы"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveEditedTopic()
+                }}
+              />
+            </label>
+            <div className="project-modal__actions project-modal__actions--stack">
+              <div className="project-modal__actions-right">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setShowEditTopicModal(false)
+                    setEditTopicId(null)
+                    setEditTopicDraft('')
+                  }}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => void saveEditedTopic()}
+                  disabled={!editTopicDraft.trim()}
+                >
+                  Сохранить
+                </button>
+              </div>
+              <button
+                type="button"
+                className="btn-secondary project-modal__delete"
+                onClick={() => void removeEditedTopic()}
+              >
+                Удалить тему
               </button>
             </div>
           </div>

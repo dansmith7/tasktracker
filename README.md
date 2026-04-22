@@ -25,6 +25,20 @@
 - Перенести старые строки можно вручную: экспорт CSV из редактора / другой БД и импорт, либо `INSERT` в **SQL Editor** с реальными `uuid` пользователей из **Authentication → Users**.
 - Полная схема — в `supabase/migrations/`.
 
+### Резервная копия всей БД (Supabase → файл)
+
+Чтобы **сохранить копию** таблиц и данных до крупных изменений:
+
+1. Установите клиент PostgreSQL (`pg_dump` / `pg_restore`), на macOS: `brew install libpq` и при необходимости `brew link --force libpq`.
+2. Скопируйте [`.env.backup.example`](.env.backup.example) → **`.env.backup`** (файл в `.gitignore`, в репозиторий не попадает).
+3. В Supabase: **Project Settings → Database** — возьмите **Database password** и **Connection string** (URI, **Direct connection**), подставьте в `DATABASE_URL` внутри `.env.backup`.
+4. Из корня проекта выполните: **`npm run backup:db`** (или `./scripts/backup-supabase-db.sh`).
+5. В папке **`backups/`** появятся файлы `supabase-full-*.sql` и `*.dump`. **Скопируйте их на диск / облако** — папка `backups/` не коммитится.
+
+Восстановление в **другой** проект Supabase (копия для экспериментов): создайте новый проект, затем `TARGET_DATABASE_URL='postgresql://...' ./scripts/restore-supabase-db.sh backups/ваш-файл.dump`. Для **локальной разработки** можно указать в `.env` URL и ключи **того же** проекта или **staging-копии** — приложение (`npm run dev`) будет ходить в выбранный инстанс.
+
+Ограничение: дамп через `pg_dump` отражает то, что доступно роли `postgres` к вашей БД; служебные части `auth` при переносе на другой проект могут потребовать отдельной настройки пользователей в Dashboard. Для продакшена дополнительно используйте **автобэкапы** Supabase на платном плане.
+
 ## Vercel
 
 В настройках проекта добавьте те же переменные (`VITE_SUPABASE_*`). Сборка: `npm run build`, выходная папка: `dist` (по умолчанию для Vite).

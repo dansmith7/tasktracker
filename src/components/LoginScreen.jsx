@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { getSupabaseEnvWarning } from '../lib/supabaseClient.js'
 
-export function LoginScreen({ onSignIn, loading }) {
-  const envWarning = getSupabaseEnvWarning()
+export function LoginScreen({ onSignIn, loading, devLoginAny = false }) {
+  const envWarning = devLoginAny ? null : getSupabaseEnvWarning()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState(null)
@@ -27,7 +27,13 @@ export function LoginScreen({ onSignIn, loading }) {
           <p className="auth-panel__eyebrow">Task tracker</p>
           <h1 className="heading-h1 auth-panel__title">Вход</h1>
           <p className="auth-panel__lede">
-            Внутренний инструмент: вход только по учётной записи, выданной администратором.
+            {devLoginAny ? (
+              <>
+                <strong>Локальная разработка:</strong> подойдёт любой email и пароль. Данные не уходят в Supabase.
+              </>
+            ) : (
+              <>Внутренний инструмент: вход только по учётной записи, выданной администратором.</>
+            )}
           </p>
           {envWarning ? (
             <p className="auth-error auth-error--box" role="status">
@@ -55,7 +61,7 @@ export function LoginScreen({ onSignIn, loading }) {
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
-              minLength={6}
+              minLength={devLoginAny ? 1 : 6}
               placeholder="••••••••"
             />
           </label>

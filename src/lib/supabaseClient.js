@@ -1,19 +1,58 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL || ''
-const anon = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
-
-export function isSupabaseConfigured() {
-  return Boolean(url && anon)
+/** Убирает пробелы и обрамляющие кавычки (часто попадают при вставке в Vercel). */
+function normalizeEnvValue(raw) {
+  if (raw == null) return ''
+  let s = String(raw).trim()
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim()
+  }
+  return s
 }
 
-/** Подсказка, если в .env остались значения из примера — запросы к Auth упадут с «Failed to fetch». */
+/** Supabase требует полный HTTP(S) URL; иначе createClient бросает «Invalid supabaseUrl». */
+function isValidHttpUrl(s) {
+  if (!s) return false
+  try {
+    const u = new URL(s)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+const url = normalizeEnvValue(import.meta.env.VITE_SUPABASE_URL)
+const anon = normalizeEnvValue(import.meta.env.VITE_SUPABASE_ANON_KEY)
+
+export function isSupabaseConfigured() {
+  return Boolean(url && anon && isValidHttpUrl(url))
+}
+
+/** Ref проекта из hostname `xxxx.supabase.co` — для подсказок в dev, какой инстанс подключён. */
+export function getSupabaseProjectRef() {
+  if (!url || !isValidHttpUrl(url)) return null
+  try {
+    const host = new URL(url).hostname
+    const m = /^([^.]+)\.supabase\.co$/i.exec(host)
+    return m ? m[1] : host
+  } catch {
+    return null
+  }
+}
+
+/** Подсказка, если остались явные плейсхолдеры из .env.example. */
 export function getSupabaseEnvWarning() {
   if (!url || !anon) return null
+  if (!isValidHttpUrl(url)) {
+    return 'VITE_SUPABASE_URL должен быть полным адресом вида https://xxxx.supabase.co (без пробелов и лишних символов). После правки .env перезапустите npm run dev.'
+  }
   const urlBad = /YOUR_PROJECT|xxx\.supabase|example\.com/i.test(url)
-  const keyBad = /^your_anon_key$/i.test(anon.trim()) || /^paste_your/i.test(anon.trim())
+  const keyBad = /^your_anon_key$/i.test(anon) || /^paste_your/i.test(anon)
   if (urlBad || keyBad) {
-    return 'В .env всё ещё шаблон из .env.example: укажите реальный Project URL и anon public key (Supabase → Settings → API), затем перезапустите npm run dev.'
+    return 'Указаны шаблонные значения (YOUR_PROJECT / your_anon_key). Вставьте реальные Project URL и anon key из Supabase → Settings → API. Локально — в файл .env; на Vercel — Project → Settings → Environment Variables (имена VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY), затем Redeploy. Без этого файла на Vercel нет — только эти переменные.'
   }
   return null
 }
@@ -25,6 +64,11 @@ export function getSupabaseEnvWarning() {
 export function normalizeAuthError(err) {
   if (!err) return err
   const msg = err.message || String(err)
+  if (/invalid login credentials|invalid credentials/i.test(msg)) {
+    return new Error(
+      'Неверный email или пароль. Если вы сменили проект в .env / .env.local, учётные записи в новом проекте другие — создайте пользователя в Supabase → Authentication → Users → Add user (или задайте пароль существующему там же).',
+    )
+  }
   const isNetwork =
     msg === 'Failed to fetch' ||
     /load failed|networkerror|network request failed|fetch/i.test(msg) ||

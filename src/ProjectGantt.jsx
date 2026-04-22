@@ -5,6 +5,16 @@ const GANTT_ROW_H = 52
 const GANTT_SIDE_W = 340
 const DAY_W = { week: 42, month: 28 }
 const ungroupedMilestoneId = 'none'
+const ASSIGNEE_COLORS = [
+  { start: '#3b82f6', end: '#2563eb', text: '#ffffff' },
+  { start: '#8b5cf6', end: '#7c3aed', text: '#ffffff' },
+  { start: '#14b8a6', end: '#0d9488', text: '#ffffff' },
+  { start: '#f59e0b', end: '#d97706', text: '#ffffff' },
+  { start: '#ec4899', end: '#db2777', text: '#ffffff' },
+  { start: '#22c55e', end: '#16a34a', text: '#ffffff' },
+  { start: '#ef4444', end: '#dc2626', text: '#ffffff' },
+]
+const UNASSIGNED_COLOR = { start: '#cbd5e1', end: '#94a3b8', text: '#1f2937' }
 
 const toDate = (value) => new Date(`${value}T00:00:00`)
 const diffDays = (a, b) => Math.round((toDate(a) - toDate(b)) / dayMs)
@@ -19,6 +29,16 @@ const shiftDate = (dateString, days) => {
 const formatDateRu = (value) => toDate(value).toLocaleDateString('ru-RU')
 const formatShort = (value) =>
   toDate(value).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
+const normalizeAssignee = (task) => {
+  const key = task.assigneeId || (task.assignee || '').trim().toLowerCase() || '__unassigned__'
+  const label = task.assignee || 'Без исполнителя'
+  return { key, label }
+}
+const hashString = (value) => {
+  let h = 0
+  for (let i = 0; i < value.length; i += 1) h = (h * 31 + value.charCodeAt(i)) | 0
+  return Math.abs(h)
+}
 
 function buildRange(visibleTasks, padding = 4) {
   const today = new Date()
@@ -55,16 +75,6 @@ function monthSegments(rangeStart, totalDays) {
     segments.push({ label, span, key: `${ds}-${label}` })
   }
   return segments
-}
-
-function ganttBarVariant(task, todayStr, isViolation) {
-  if (task.status === 'Готово') return 'done'
-  if (isViolation) return 'problem'
-  const d = diffDays(task.deadline, todayStr)
-  if (d < 0) return 'danger'
-  if (d === 0) return 'today'
-  if (d >= 1 && d <= 7) return 'warning'
-  return 'info'
 }
 
 function milestoneAggRange(tasksInMilestone) {
@@ -108,6 +118,18 @@ export function ProjectGantt({
   const expandedSet = useMemo(() => new Set(expandedIds), [expandedIds])
   const violating = useMemo(() => new Set(violatingTaskIds), [violatingTaskIds])
   const taskById = useMemo(() => new Map(visibleTasks.map((t) => [t.id, t])), [visibleTasks])
+  const assigneeLegend = useMemo(() => {
+    const byKey = new Map()
+    for (const t of visibleTasks) {
+      const { key, label } = normalizeAssignee(t)
+      if (!byKey.has(key)) byKey.set(key, { key, label })
+    }
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label, 'ru'))
+  }, [visibleTasks])
+  const assigneeColor = useCallback((assigneeKey) => {
+    if (assigneeKey === '__unassigned__') return UNASSIGNED_COLOR
+    return ASSIGNEE_COLORS[hashString(assigneeKey) % ASSIGNEE_COLORS.length]
+  }, [])
 
   const rows = useMemo(() => {
     const list = []
@@ -183,7 +205,7 @@ export function ProjectGantt({
       const width = Math.max(dur * dayW - 8, 8)
       return { left, width: Math.min(width, gridW - left + 4) }
     },
-    [rangeStart, totalDays, dayW, gridW],
+    [rangeStart, dayW, gridW],
   )
 
   const onBarPointerDown = useCallback(
@@ -503,7 +525,8 @@ export function ProjectGantt({
 
                 const task = displayTask(row.task)
                 const { left, width } = barLeftWidth(task)
-                const v = ganttBarVariant(task, todayStr, violating.has(task.id))
+                const { key: assigneeKey } = normalizeAssignee(task)
+                const color = assigneeColor(assigneeKey)
                 return (
                   <div
                     key={`gr-${task.id}`}
@@ -518,8 +541,13 @@ export function ProjectGantt({
                     }}
                   >
                     <div
-                      className={`gantt-bar gantt-bar--${v}`}
-                      style={{ left, width }}
+                      className={`gantt-bar${task.status === 'Готово' ? ' gantt-bar--done-state' : ''}${violating.has(task.id) ? ' gantt-bar--problem-state' : ''}`}
+                      style={{
+                        left,
+                        width,
+                        background: `linear-gradient(180deg, ${color.start} 0%, ${color.end} 100%)`,
+                        color: color.text,
+                      }}
                       title={`${task.title}\n${formatDateRu(task.startDate)} — ${formatDateRu(task.deadline)}\n${task.status}${row.milestone ? `\nВеха: ${row.milestone.name}` : ''}`}
                       onPointerDown={(e) => {
                         if (e.target.closest('.gantt-bar__handle')) return
@@ -551,22 +579,18 @@ export function ProjectGantt({
       </div>
 
       <div className="gantt-legend">
-        <span className="gantt-legend-item">
-          <span className="gantt-legend-dot gantt-legend-dot--info" />
-          Дальше по сроку
-        </span>
-        <span className="gantt-legend-item">
-          <span className="gantt-legend-dot gantt-legend-dot--today" />
-          На сегодня
-        </span>
-        <span className="gantt-legend-item">
-          <span className="gantt-legend-dot gantt-legend-dot--warning" />
-          Ближайшие
-        </span>
-        <span className="gantt-legend-item">
-          <span className="gantt-legend-dot gantt-legend-dot--danger" />
-          Просрочено
-        </span>
+        {assigneeLegend.map((a) => {
+          const color = assigneeColor(a.key)
+          return (
+            <span key={a.key} className="gantt-legend-item">
+              <span
+                className="gantt-legend-dot"
+                style={{ background: `linear-gradient(180deg, ${color.start} 0%, ${color.end} 100%)` }}
+              />
+              {a.label}
+            </span>
+          )
+        })}
         <span className="gantt-legend-item">
           <span className="gantt-legend-line" />
           Связь зависимых задач

@@ -1,39 +1,71 @@
 /* eslint-disable react-hooks/set-state-in-effect -- синхронизация состояния с Supabase Auth / профилем */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { DEV_LOCAL_USER_ID, isDevLoginAny, isLocalDevMock, isOfflineDevMode } from '../lib/localDev.js'
+import { setDevProfileDisplayName } from '../lib/localMockStore.js'
 import { getSupabase, isSupabaseConfigured, normalizeAuthError } from '../lib/supabaseClient'
 
 const AuthContext = createContext(null)
 
+const MOCK_PROFILE = {
+  id: DEV_LOCAL_USER_ID,
+  name: 'Локальная разработка',
+  avatar_url: null,
+}
+
+const MOCK_SESSION = { user: { id: DEV_LOCAL_USER_ID } }
+
 export function AuthProvider({ children }) {
-  const [session, setSession] = useState(null)
-  const [profile, setProfile] = useState(null)
+  const localMock = isLocalDevMock()
+  const devLoginAny = isDevLoginAny()
+  const offlineDev = isOfflineDevMode()
+
+  const [session, setSession] = useState(() => (localMock ? MOCK_SESSION : null))
+  const [profile, setProfile] = useState(() => (localMock ? MOCK_PROFILE : null))
   /** null | 'missing' | 'fetch_failed' — только при наличии session */
   const [profileError, setProfileError] = useState(null)
   const [profileLoading, setProfileLoading] = useState(false)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => !offlineDev)
 
-  const supabase = getSupabase()
+  const supabase = offlineDev ? null : getSupabase()
 
   useEffect(() => {
+    if (offlineDev) {
+      setLoading(false)
+      return
+    }
     if (!supabase) {
       setLoading(false)
       return
     }
     let mounted = true
+
+    supabase.auth
+      .getSession()
+      .then(({ data: { session: s } }) => {
+        if (!mounted) return
+        setSession(s)
+        setLoading(false)
+      })
+      .catch(() => {
+        if (!mounted) return
+        setLoading(false)
+      })
+
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, s) => {
+    } = supabase.auth.onAuthStateChange((_event, s) => {
       if (!mounted) return
       setSession(s)
-      if (event === 'INITIAL_SESSION') setLoading(false)
     })
+
     return () => {
       mounted = false
       subscription.unsubscribe()
     }
-  }, [supabase])
+  }, [offlineDev, supabase])
 
   useEffect(() => {
+    if (offlineDev) return
     if (!supabase || !session?.user?.id) {
       setProfile(null)
       setProfileError(null)
@@ -73,26 +105,59 @@ export function AuthProvider({ children }) {
     return () => {
       cancelled = true
     }
-  }, [supabase, session?.user?.id])
+  }, [offlineDev, supabase, session?.user?.id])
 
   const signIn = useCallback(
     async (email, password) => {
+      if (localMock) {
+        setSession(MOCK_SESSION)
+        setProfile(MOCK_PROFILE)
+        setProfileError(null)
+        return { data: { session: MOCK_SESSION, user: MOCK_SESSION.user }, error: null }
+      }
+      if (devLoginAny) {
+        const em = (email || '').trim()
+        if (!em) return { error: new Error('Введите email') }
+        const pwd = password ?? ''
+        if (!String(pwd).trim()) {
+          return { error: new Error('Введите пароль (в локальном режиме подойдёт любой)') }
+        }
+        const displayName = em.includes('@') ? em.split('@')[0].trim() || 'Dev' : em
+        setDevProfileDisplayName(displayName)
+        setSession(MOCK_SESSION)
+        setProfile({ id: DEV_LOCAL_USER_ID, name: displayName, avatar_url: null })
+        setProfileError(null)
+        return { data: { session: MOCK_SESSION, user: MOCK_SESSION.user }, error: null }
+      }
       if (!supabase) return { error: new Error('Supabase не настроен') }
       const result = await supabase.auth.signInWithPassword({ email, password })
       if (result.error) return { ...result, error: normalizeAuthError(result.error) }
       return result
     },
-    [supabase],
+    [localMock, devLoginAny, supabase],
   )
 
   const signOut = useCallback(async () => {
+    if (localMock) {
+      setSession(MOCK_SESSION)
+      setProfile(MOCK_PROFILE)
+      setProfileError(null)
+      return
+    }
+    if (devLoginAny) {
+      setSession(null)
+      setProfile(null)
+      setProfileError(null)
+      return
+    }
     if (!supabase) return
     await supabase.auth.signOut()
     setProfile(null)
     setProfileError(null)
-  }, [supabase])
+  }, [localMock, devLoginAny, supabase])
 
   const refreshProfile = useCallback(async () => {
+    if (offlineDev) return
     if (!supabase || !session?.user?.id) return
     const { data, error } = await supabase
       .from('profiles')
@@ -108,12 +173,15 @@ export function AuthProvider({ children }) {
       setProfile(data)
       setProfileError(null)
     }
-  }, [supabase, session?.user?.id])
+  }, [offlineDev, supabase, session])
 
   const value = useMemo(
     () => ({
       supabase,
-      configured: isSupabaseConfigured(),
+      localDevMock: localMock,
+      devLoginAny,
+      offlineDev,
+      configured: offlineDev || isSupabaseConfigured(),
       session,
       profile,
       profileError,
@@ -123,7 +191,20 @@ export function AuthProvider({ children }) {
       signOut,
       refreshProfile,
     }),
-    [supabase, session, profile, profileError, profileLoading, loading, signIn, signOut, refreshProfile],
+    [
+      localMock,
+      devLoginAny,
+      offlineDev,
+      supabase,
+      session,
+      profile,
+      profileError,
+      profileLoading,
+      loading,
+      signIn,
+      signOut,
+      refreshProfile,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

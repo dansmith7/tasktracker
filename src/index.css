@@ -176,6 +176,86 @@ body {
   color: #1f2937;
 }
 
+/* Режим VITE_LOCAL_DEV_MOCK — без Supabase */
+.local-mock-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100000;
+  padding: var(--space-3) var(--space-4);
+  background: rgba(96, 216, 18, 0.2);
+  border-bottom: 1px solid rgba(61, 122, 18, 0.35);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-heading-color, #1f2937);
+}
+
+.local-mock-banner__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  max-width: 72rem;
+}
+
+.local-mock-banner__reset {
+  margin-left: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-field);
+  border: 1px solid rgba(61, 122, 18, 0.5);
+  background: #fff;
+  cursor: pointer;
+}
+
+.local-mock-banner__reset:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+/* Подсказка про изоляцию dev / staging Supabase */
+.dev-sync-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100000;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-warning-bg);
+  border-bottom: 1px solid rgba(133, 77, 14, 0.25);
+  color: var(--color-on-warning);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dev-sync-banner__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-2);
+}
+
+.dev-sync-banner__title {
+  font-weight: 700;
+}
+
+.dev-sync-banner__ref code {
+  font-size: 12px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.55);
+  border-radius: 4px;
+}
+
+.dev-sync-banner__text {
+  margin: 0;
+  max-width: 72rem;
+}
+
+.dev-sync-banner__text code {
+  font-size: 12px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.55);
+  border-radius: 4px;
+}
+
 /* Видно только в npm run dev — если метки нет, открыт не dev-сервер или старый кэш */
 .dev-mode-indicator {
   position: fixed;
