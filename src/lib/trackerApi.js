@@ -86,6 +86,24 @@ function isSubtaskRow(row) {
 
 let hasParentTaskIdColumn = null
 
+const SCHEMA_RELOAD_RPC = 'reload_postgrest_schema_cache'
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Пытается перезагрузить schema cache PostgREST (если в БД есть соответствующий RPC).
+ * Нужен для случаев, когда миграция уже применена, а API ещё держит старую схему.
+ * @param {import('@supabase/supabase-js').SupabaseClient} client
+ */
+async function tryReloadPostgrestSchemaCache(client) {
+  const r = await client.rpc(SCHEMA_RELOAD_RPC)
+  if (r.error && !isMissingFunctionError(r.error, SCHEMA_RELOAD_RPC)) throw r.error
+  // Даём PostgREST короткое время применить новый кэш схемы.
+  await sleep(350)
+}
+
 /**
  * Проверяет наличие колонки подзадач в подключенной БД и кэширует результат.
  * Это нужно для совместимости со старыми схемами, где parent_task_id ещё не применён.
@@ -93,10 +111,14 @@ let hasParentTaskIdColumn = null
  */
 async function supportsParentTaskColumn(client) {
   if (hasParentTaskIdColumn !== null) return hasParentTaskIdColumn
-  const probe = await client.from('tasks').select('parent_task_id').limit(1)
+  let probe = await client.from('tasks').select('parent_task_id').limit(1)
   if (probe.error && isMissingColumnError(probe.error, 'parent_task_id')) {
-    hasParentTaskIdColumn = false
-    return false
+    await tryReloadPostgrestSchemaCache(client)
+    probe = await client.from('tasks').select('parent_task_id').limit(1)
+    if (probe.error && isMissingColumnError(probe.error, 'parent_task_id')) {
+      hasParentTaskIdColumn = false
+      return false
+    }
   }
   if (probe.error) throw probe.error
   hasParentTaskIdColumn = true
@@ -116,6 +138,10 @@ export async function persistProjectTasksDelta(client, projectId, userId, oldTas
       const row = taskRowFromApp(t, projectId, userId)
       let r = await client.from('tasks').insert(row).select()
       if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
+        await tryReloadPostgrestSchemaCache(client)
+        r = await client.from('tasks').insert(row).select()
+      }
+      if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
         // Для подзадач нельзя молча "понижать" запись до обычной задачи.
         if (!isSubtaskRow(row)) {
           const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
@@ -131,6 +157,10 @@ export async function persistProjectTasksDelta(client, projectId, userId, oldTas
       if (taskPersistableFieldsDiffer(o, t)) {
         const row = taskRowFromApp(t, projectId, userId)
         let r = await client.from('tasks').upsert(row, { onConflict: 'id' }).select()
+        if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
+          await tryReloadPostgrestSchemaCache(client)
+          r = await client.from('tasks').upsert(row, { onConflict: 'id' }).select()
+        }
         if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
           // Для подзадач нельзя молча "понижать" запись до обычной задачи.
           if (!isSubtaskRow(row)) {
