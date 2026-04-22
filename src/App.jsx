@@ -2235,6 +2235,7 @@ function App() {
 
   useEffect(() => {
     if (!pendingTaskLink?.taskId) return
+    if (!dataEnabled) return
     if (dataLoading) return
     const hit = tasksIndexById.get(pendingTaskLink.taskId)
     if (!hit) {
@@ -2258,7 +2259,7 @@ function App() {
     writeTaskLinkToUrl(hit.task.id, hit.projectId)
     setPendingTaskLink(null)
     setUrlSyncEnabled(true)
-  }, [pendingTaskLink, dataLoading, tasksIndexById, selectedTopicFilter, mineFilterActive, currentUserId, users])
+  }, [pendingTaskLink, dataEnabled, dataLoading, tasksIndexById, selectedTopicFilter, mineFilterActive, currentUserId, users])
 
   useEffect(() => {
     if (!urlSyncEnabled) return
