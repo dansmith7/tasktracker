@@ -80,6 +80,10 @@ function removeTaskOptionalFieldsForLegacySchema(row, missingColumn) {
   return next
 }
 
+function isSubtaskRow(row) {
+  return Boolean(row?.parent_task_id)
+}
+
 let hasParentTaskIdColumn = null
 
 /**
@@ -112,8 +116,11 @@ export async function persistProjectTasksDelta(client, projectId, userId, oldTas
       const row = taskRowFromApp(t, projectId, userId)
       let r = await client.from('tasks').insert(row).select()
       if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
-        const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
-        r = await client.from('tasks').insert(legacyRow).select()
+        // Для подзадач нельзя молча "понижать" запись до обычной задачи.
+        if (!isSubtaskRow(row)) {
+          const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
+          r = await client.from('tasks').insert(legacyRow).select()
+        }
       }
       logResult('insertTask', r)
       if (r.error) throw r.error
@@ -125,8 +132,11 @@ export async function persistProjectTasksDelta(client, projectId, userId, oldTas
         const row = taskRowFromApp(t, projectId, userId)
         let r = await client.from('tasks').upsert(row, { onConflict: 'id' }).select()
         if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
-          const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
-          r = await client.from('tasks').upsert(legacyRow, { onConflict: 'id' }).select()
+          // Для подзадач нельзя молча "понижать" запись до обычной задачи.
+          if (!isSubtaskRow(row)) {
+            const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
+            r = await client.from('tasks').upsert(legacyRow, { onConflict: 'id' }).select()
+          }
         }
         logResult('upsertTask', r)
         if (r.error) throw r.error
