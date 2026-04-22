@@ -53,11 +53,16 @@ function readMineFilterForUser(userId) {
   }
 }
 
+function normalizeEntityId(raw) {
+  const value = (raw || '').trim().toLowerCase()
+  return value || null
+}
+
 function readTaskLinkFromUrl() {
   if (typeof window === 'undefined') return { taskId: null, projectId: null }
   const p = new URLSearchParams(window.location.search)
-  const taskId = (p.get(taskLinkParam) || '').trim() || null
-  const projectId = (p.get(taskProjectLinkParam) || '').trim() || null
+  const taskId = normalizeEntityId(p.get(taskLinkParam))
+  const projectId = normalizeEntityId(p.get(taskProjectLinkParam))
   return { taskId, projectId }
 }
 
@@ -2067,6 +2072,7 @@ function App() {
   const [openedTaskId, setOpenedTaskId] = useState(null)
   const [pendingTaskLink, setPendingTaskLink] = useState(() => readTaskLinkFromUrl())
   const [urlSyncEnabled, setUrlSyncEnabled] = useState(() => !readTaskLinkFromUrl().taskId)
+  const taskLinkRetryRef = useRef(new Set())
   const [editingMilestoneTitleId, setEditingMilestoneTitleId] = useState(null)
   const [editingMilestoneTitleDraft, setEditingMilestoneTitleDraft] = useState('')
   const [milestoneMenuOpenId, setMilestoneMenuOpenId] = useState(null)
@@ -2163,7 +2169,7 @@ function App() {
     const byId = new Map()
     for (const project of projects) {
       for (const task of project.tasks ?? []) {
-        byId.set(task.id, { task, projectId: project.id, topicId: project.topicId ?? null })
+        byId.set(normalizeEntityId(task.id), { task, projectId: project.id, topicId: project.topicId ?? null })
       }
     }
     return byId
@@ -2239,6 +2245,12 @@ function App() {
     if (dataLoading) return
     const hit = tasksIndexById.get(pendingTaskLink.taskId)
     if (!hit) {
+      // На проде дерево может приходить не с первой попытки: даём один авто-retry перед ошибкой.
+      if (!taskLinkRetryRef.current.has(pendingTaskLink.taskId)) {
+        taskLinkRetryRef.current.add(pendingTaskLink.taskId)
+        void refresh()
+        return
+      }
       setPendingTaskLink(null)
       setUrlSyncEnabled(true)
       setOpenedTaskId(null)
@@ -2246,6 +2258,7 @@ function App() {
       setDependencyError('Задача по ссылке не найдена или недоступна')
       return
     }
+    taskLinkRetryRef.current.delete(pendingTaskLink.taskId)
     // По ссылке задача должна открыться всегда: снимаем фильтры, которые могут её скрыть.
     if (selectedTopicFilter !== 'all') setSelectedTopicFilter('all')
     if (mineFilterActive && currentUserId) {
@@ -2259,7 +2272,17 @@ function App() {
     writeTaskLinkToUrl(hit.task.id, hit.projectId)
     setPendingTaskLink(null)
     setUrlSyncEnabled(true)
-  }, [pendingTaskLink, dataEnabled, dataLoading, tasksIndexById, selectedTopicFilter, mineFilterActive, currentUserId, users])
+  }, [
+    pendingTaskLink,
+    dataEnabled,
+    dataLoading,
+    tasksIndexById,
+    selectedTopicFilter,
+    mineFilterActive,
+    currentUserId,
+    users,
+    refresh,
+  ])
 
   useEffect(() => {
     if (!urlSyncEnabled) return
