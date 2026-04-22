@@ -63,6 +63,12 @@ function isMissingColumnError(error, columnName) {
   return false
 }
 
+function removeTaskOptionalFieldsForLegacySchema(row, missingColumn) {
+  const next = { ...row }
+  if (missingColumn === 'parent_task_id') delete next.parent_task_id
+  return next
+}
+
 /**
  * Сохраняет дельту списка задач: insert новых, upsert изменённых, синхронизирует зависимости.
  * @param {import('@supabase/supabase-js').SupabaseClient} client
@@ -74,7 +80,11 @@ export async function persistProjectTasksDelta(client, projectId, userId, oldTas
     const o = oldMap.get(t.id)
     if (!o) {
       const row = taskRowFromApp(t, projectId, userId)
-      const r = await client.from('tasks').insert(row).select()
+      let r = await client.from('tasks').insert(row).select()
+      if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
+        const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
+        r = await client.from('tasks').insert(legacyRow).select()
+      }
       logResult('insertTask', r)
       if (r.error) throw r.error
       if (t.dependsOnTaskId) {
@@ -83,7 +93,11 @@ export async function persistProjectTasksDelta(client, projectId, userId, oldTas
     } else {
       if (taskPersistableFieldsDiffer(o, t)) {
         const row = taskRowFromApp(t, projectId, userId)
-        const r = await client.from('tasks').upsert(row, { onConflict: 'id' }).select()
+        let r = await client.from('tasks').upsert(row, { onConflict: 'id' }).select()
+        if (r.error && isMissingColumnError(r.error, 'parent_task_id')) {
+          const legacyRow = removeTaskOptionalFieldsForLegacySchema(row, 'parent_task_id')
+          r = await client.from('tasks').upsert(legacyRow, { onConflict: 'id' }).select()
+        }
         logResult('upsertTask', r)
         if (r.error) throw r.error
       }
