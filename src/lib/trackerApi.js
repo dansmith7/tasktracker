@@ -80,6 +80,25 @@ function removeTaskOptionalFieldsForLegacySchema(row, missingColumn) {
   return next
 }
 
+let hasParentTaskIdColumn = null
+
+/**
+ * Проверяет наличие колонки подзадач в подключенной БД и кэширует результат.
+ * Это нужно для совместимости со старыми схемами, где parent_task_id ещё не применён.
+ * @param {import('@supabase/supabase-js').SupabaseClient} client
+ */
+async function supportsParentTaskColumn(client) {
+  if (hasParentTaskIdColumn !== null) return hasParentTaskIdColumn
+  const probe = await client.from('tasks').select('parent_task_id').limit(1)
+  if (probe.error && isMissingColumnError(probe.error, 'parent_task_id')) {
+    hasParentTaskIdColumn = false
+    return false
+  }
+  if (probe.error) throw probe.error
+  hasParentTaskIdColumn = true
+  return true
+}
+
 /**
  * Сохраняет дельту списка задач: insert новых, upsert изменённых, синхронизирует зависимости.
  * @param {import('@supabase/supabase-js').SupabaseClient} client
@@ -252,6 +271,7 @@ export async function deleteMilestoneRemote(client, milestoneId) {
 export async function syncParentDeadlineFromChildren(client, parentTaskId, userId) {
   if (!parentTaskId) return
   if (isOfflineDevMode()) return localMock.syncParentDeadlineFromChildren(client, parentTaskId, userId)
+  if (!(await supportsParentTaskColumn(client))) return
   const { data: parent, error: e1 } = await client.from('tasks').select('id, due_date').eq('id', parentTaskId).maybeSingle()
   if (e1 || !parent) return
   const { data: children, error: e2 } = await client.from('tasks').select('due_date').eq('parent_task_id', parentTaskId)
@@ -275,8 +295,13 @@ export async function syncParentDeadlineFromChildren(client, parentTaskId, userI
 /** @param {import('@supabase/supabase-js').SupabaseClient} client */
 export async function deleteTaskRemote(client, taskId, userId) {
   if (isOfflineDevMode()) return localMock.deleteTaskRemote(client, taskId, userId)
-  const { data: row } = await client.from('tasks').select('parent_task_id').eq('id', taskId).maybeSingle()
-  const parentId = row?.parent_task_id ?? null
+  let parentId = null
+  if (await supportsParentTaskColumn(client)) {
+    const { data: row, error } = await client.from('tasks').select('parent_task_id').eq('id', taskId).maybeSingle()
+    if (error && !isMissingColumnError(error, 'parent_task_id')) throw error
+    if (error && isMissingColumnError(error, 'parent_task_id')) hasParentTaskIdColumn = false
+    parentId = row?.parent_task_id ?? null
+  }
   const r = await client.from('tasks').delete().eq('id', taskId)
   logResult('deleteTask', r)
   if (r.error) throw r.error
@@ -304,8 +329,15 @@ export async function updateTasksStatusBulkRemote(client, userId, taskIds, statu
 export async function deleteTasksBulkRemote(client, taskIds, userId) {
   if (!taskIds.length) return
   if (isOfflineDevMode()) return localMock.deleteTasksBulkRemote(client, taskIds, userId)
-  const { data: rows } = await client.from('tasks').select('parent_task_id').in('id', taskIds)
-  const parentIds = new Set((rows ?? []).map((x) => x.parent_task_id).filter(Boolean))
+  const parentIds = new Set()
+  if (await supportsParentTaskColumn(client)) {
+    const { data: rows, error } = await client.from('tasks').select('parent_task_id').in('id', taskIds)
+    if (error && !isMissingColumnError(error, 'parent_task_id')) throw error
+    if (error && isMissingColumnError(error, 'parent_task_id')) hasParentTaskIdColumn = false
+    for (const row of rows ?? []) {
+      if (row.parent_task_id) parentIds.add(row.parent_task_id)
+    }
+  }
   const r = await client.from('tasks').delete().in('id', taskIds)
   logResult('deleteTasksBulk', r)
   if (r.error) throw r.error
