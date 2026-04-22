@@ -35,6 +35,8 @@ import './App.css'
 const statusOptions = ['В работе', 'Готово']
 const ungroupedMilestoneId = 'none'
 const dayMs = 1000 * 60 * 60 * 24
+const taskLinkParam = 'task'
+const taskProjectLinkParam = 'project'
 
 /** @param {string} userId */
 function mineFilterStorageKey(userId) {
@@ -49,6 +51,38 @@ function readMineFilterForUser(userId) {
   } catch {
     return false
   }
+}
+
+function readTaskLinkFromUrl() {
+  if (typeof window === 'undefined') return { taskId: null, projectId: null }
+  const p = new URLSearchParams(window.location.search)
+  const taskId = (p.get(taskLinkParam) || '').trim() || null
+  const projectId = (p.get(taskProjectLinkParam) || '').trim() || null
+  return { taskId, projectId }
+}
+
+function buildTaskLinkUrl(taskId, projectId = null) {
+  if (typeof window === 'undefined') return ''
+  const url = new URL(window.location.href)
+  if (taskId) url.searchParams.set(taskLinkParam, taskId)
+  else url.searchParams.delete(taskLinkParam)
+  if (projectId) url.searchParams.set(taskProjectLinkParam, projectId)
+  else url.searchParams.delete(taskProjectLinkParam)
+  return url.toString()
+}
+
+function writeTaskLinkToUrl(taskId, projectId = null) {
+  if (typeof window === 'undefined') return
+  const url = buildTaskLinkUrl(taskId, projectId)
+  window.history.replaceState(null, '', url)
+}
+
+function clearTaskLinkFromUrl() {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  url.searchParams.delete(taskLinkParam)
+  url.searchParams.delete(taskProjectLinkParam)
+  window.history.replaceState(null, '', url.toString())
 }
 
 /** @param {AppUser[]} users */
@@ -1416,6 +1450,7 @@ function TaskLightPanel({
   apiConnected,
   onUpdateTask,
   onDeleteTask,
+  onCopyTaskLink,
   onClose,
   refresh,
 }) {
@@ -1640,6 +1675,15 @@ function TaskLightPanel({
               </span>
             </p>
             <div className="task-panel__icon-actions">
+              <button
+                type="button"
+                className="task-panel__icon-btn"
+                onClick={() => onCopyTaskLink(task.id)}
+                aria-label="Скопировать ссылку на задачу"
+                title="Скопировать ссылку"
+              >
+                🔗
+              </button>
               <button type="button" className="task-panel__icon-btn" onClick={onClose} aria-label="Закрыть">
                 ✕
               </button>
@@ -2021,6 +2065,8 @@ function App() {
   const [editTopicDraft, setEditTopicDraft] = useState('')
   const [editTopicId, setEditTopicId] = useState(null)
   const [openedTaskId, setOpenedTaskId] = useState(null)
+  const [pendingTaskLink, setPendingTaskLink] = useState(() => readTaskLinkFromUrl())
+  const [urlSyncEnabled, setUrlSyncEnabled] = useState(() => !readTaskLinkFromUrl().taskId)
   const [editingMilestoneTitleId, setEditingMilestoneTitleId] = useState(null)
   const [editingMilestoneTitleDraft, setEditingMilestoneTitleDraft] = useState('')
   const [milestoneMenuOpenId, setMilestoneMenuOpenId] = useState(null)
@@ -2113,6 +2159,15 @@ function App() {
     () => selectedProject?.tasks.find((t) => t.id === openedTaskId) ?? null,
     [selectedProject, openedTaskId],
   )
+  const tasksIndexById = useMemo(() => {
+    const byId = new Map()
+    for (const project of projects) {
+      for (const task of project.tasks ?? []) {
+        byId.set(task.id, { task, projectId: project.id, topicId: project.topicId ?? null })
+      }
+    }
+    return byId
+  }, [projects])
 
   /** Все вехи + «Без вехи» — состояние по умолчанию (развернуто). */
   const allExpandedMilestoneIds = useMemo(() => {
@@ -2161,6 +2216,58 @@ function App() {
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [milestoneMenuOpenId])
+
+  useEffect(() => {
+    const onPopState = () => {
+      const link = readTaskLinkFromUrl()
+      if (!link.taskId) {
+        setPendingTaskLink(null)
+        setOpenedTaskId(null)
+        setUrlSyncEnabled(true)
+        return
+      }
+      setPendingTaskLink(link)
+      setUrlSyncEnabled(false)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  useEffect(() => {
+    if (!pendingTaskLink?.taskId) return
+    if (dataLoading) return
+    const hit = tasksIndexById.get(pendingTaskLink.taskId)
+    if (!hit) {
+      setPendingTaskLink(null)
+      setUrlSyncEnabled(true)
+      setOpenedTaskId(null)
+      clearTaskLinkFromUrl()
+      setDependencyError('Задача по ссылке не найдена или недоступна')
+      return
+    }
+    // По ссылке задача должна открыться всегда: снимаем фильтры, которые могут её скрыть.
+    if (selectedTopicFilter !== 'all') setSelectedTopicFilter('all')
+    if (mineFilterActive && currentUserId) {
+      const assigneeId = resolveTaskAssigneeId(hit.task, users)
+      if (assigneeId !== currentUserId) {
+        setMineFilterActive(false)
+      }
+    }
+    setSelectedProjectId(hit.projectId)
+    setOpenedTaskId(hit.task.id)
+    writeTaskLinkToUrl(hit.task.id, hit.projectId)
+    setPendingTaskLink(null)
+    setUrlSyncEnabled(true)
+  }, [pendingTaskLink, dataLoading, tasksIndexById, selectedTopicFilter, mineFilterActive, currentUserId, users])
+
+  useEffect(() => {
+    if (!urlSyncEnabled) return
+    if (openedTaskId && resolvedSelectedProjectId) {
+      writeTaskLinkToUrl(openedTaskId, resolvedSelectedProjectId)
+      return
+    }
+    clearTaskLinkFromUrl()
+  }, [urlSyncEnabled, openedTaskId, resolvedSelectedProjectId])
 
   const switchProject = (id) => {
     setSelectedProjectId(id)
@@ -3095,6 +3202,21 @@ function App() {
     if (e.target.closest('button, a, input, select')) return
     setOpenedTaskId(taskId)
   }
+
+  const copyTaskLink = useCallback(
+    async (taskId) => {
+      const projectId = tasksIndexById.get(taskId)?.projectId ?? resolvedSelectedProjectId ?? null
+      const url = buildTaskLinkUrl(taskId, projectId)
+      if (!url) return
+      try {
+        await navigator.clipboard.writeText(url)
+        setTaskMoveNotice({ variant: 'success', text: 'Ссылка на задачу скопирована' })
+      } catch {
+        setDependencyError('Не удалось скопировать ссылку на задачу')
+      }
+    },
+    [tasksIndexById, resolvedSelectedProjectId],
+  )
 
   if (!configured) {
     const prodHint = import.meta.env.PROD
@@ -4439,6 +4561,7 @@ function App() {
           apiConnected={apiConnected}
           onUpdateTask={updateTask}
           onDeleteTask={deleteTaskById}
+          onCopyTaskLink={copyTaskLink}
           onClose={() => setOpenedTaskId(null)}
           refresh={refresh}
         />
